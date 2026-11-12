@@ -16,6 +16,8 @@ The extension checks each Figma MCP tool call before it runs. When the script ca
 
 Nothing reaches Figma, so no edit is lost, and the agent switches to `node.screenshot()` on its next try.
 
+To make the first try right, the extension also adds one line to the agent's system prompt when a Figma MCP server is configured (an `mcp__…figma…` server listed in the prompt): use `node.screenshot()`, never return base64. The block stays as the safety net for when the agent forgets.
+
 ## What it checks
 
 - **Tools:** any tool of an MCP server whose name contains `figma` (`mcp__figma__*`, `mcp__figma_linux_next__*`, hash-suffixed names) and that receives a `code` string. Tools without `code`, such as `get_screenshot`, always pass.

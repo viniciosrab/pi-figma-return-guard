@@ -2,14 +2,22 @@
   "name": "pi-figma-return-guard",
   "version": "0.1.0",
   "description": "Pi extension: blocks Figma MCP use_figma scripts that return images as base64, which exceed the 48,000-byte return limit and discard the run's canvas edits.",
-  "keywords": ["pi-package", "pi", "extension", "figma", "mcp"],
+  "keywords": [
+    "pi-package",
+    "pi",
+    "extension",
+    "figma",
+    "mcp"
+  ],
   "license": "MIT",
   "type": "module",
   "scripts": {
-    "test": "node --experimental-strip-types --no-warnings tests/figma-return-guard.test.mjs"
+    "test": "node --experimental-strip-types --no-warnings tests/figma-return-guard.test.mjs && node --experimental-strip-types --no-warnings tests/prompt-hint.test.mjs"
   },
   "pi": {
-    "extensions": ["./src/index.ts"]
+    "extensions": [
+      "./src/index.ts"
+    ]
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*"
