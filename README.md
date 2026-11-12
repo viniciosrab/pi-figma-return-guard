@@ -18,6 +18,23 @@ Nothing reaches Figma, so no edit is lost, and the agent switches to `node.scree
 
 To make the first try right, the extension also tells the agent up front, once per session, in a hidden message: use `node.screenshot()`, never return base64. It does this only when a Figma MCP server is configured (in `mcp.json`, registered as tools, or listed in the prompt). A hidden message reaches every provider, including ones such as claude-bridge that rebuild the system prompt and drop prompt changes from extensions. The block stays as the safety net for when the agent forgets.
 
+## Other script mistakes
+
+The same hint also tells the agent to filter layer lookups by type and to look nodes up again after `remove()` or `detachInstance()`.
+
+Before a script reaches Figma, the extension blocks two kinds of scripts that cannot work:
+
+- calls the use_figma runtime rejects (`loadAllPagesAsync`, `setFileThumbnailNodeAsync`, `setPluginData`, `getPluginData`, `setRangeOpenTypeFeatures`), naming what to use instead;
+- scripts that do not parse, such as a `const` declared twice after joining helper snippets, naming the problem and the line.
+
+When a script fails in Figma, the extension adds to the error text:
+
+- the script line the error points at;
+- the likely cause and fix for the errors seen in real sessions: a lookup that found nothing or a TEXT layer named like its FRAME, a node used after it was removed or detached, an unsupported API, a locked instance layer, an unquoted non-ASCII `query()` selector, a NaN value, a component property reference outside a component, and syntax errors;
+- a note that Figma discarded all of the run's canvas edits, so the agent reruns the fixed script instead of cleaning up.
+
+Argument validation errors, timeouts and blocked calls are left alone, because nothing ran in Figma.
+
 ## What it checks
 
 - **Tools:** any tool of an MCP server whose name contains `figma` (`mcp__figma__*`, `mcp__figma_linux_next__*`, hash-suffixed names) and that receives a `code` string. Tools without `code`, such as `get_screenshot`, always pass.

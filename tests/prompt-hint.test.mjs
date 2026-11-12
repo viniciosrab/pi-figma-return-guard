@@ -28,6 +28,8 @@ const isHint = (r) => r?.message?.customType === "figma-return-guard" && r.messa
 check("registers before_agent_start and session_start handlers",
   typeof handlers.before_agent_start === "function" && typeof handlers.session_start === "function");
 check("hint names node.screenshot and forbids base64", /node\.screenshot/.test(mod.HINT ?? "") && /base64/.test(mod.HINT ?? ""));
+check("hint tells to filter lookups by type and to look nodes up again after remove/detachInstance",
+  /n\.type === 'FRAME'/.test(mod.HINT ?? "") && /detachInstance/.test(mod.HINT ?? "") && /remove\(\)/.test(mod.HINT ?? ""));
 
 const withFigma = "You are an agent.\n<mcp_servers>\n- mcp__figma (codemode): The official Figma MCP server.\n</mcp_servers>";
 const plain = "You are an agent.";

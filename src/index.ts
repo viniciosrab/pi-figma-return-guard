@@ -5,12 +5,15 @@
 // does not count toward the limit, so the guard points the agent there.
 // It also tells the agent this up front, once per session, in a hidden
 // message, whenever a Figma MCP server is configured.
+// It also stops scripts that cannot work (unsupported APIs, syntax errors)
+// before they reach Figma, and adds the likely cause and fix to failed results.
 // Tests: npm test
 // @ts-nocheck
 
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import vm from "node:vm";
 
 // Any tool of a Figma MCP server (figma, figma-linux-next, figma-desktop, hash
 // suffixes) that takes a `code` script; get_screenshot has no `code` and passes.
@@ -30,7 +33,10 @@ export const HINT =
   "Figma MCP scripts (use_figma): never return images as base64 or data URLs (`exportAsync` + `figma.base64Encode` or " +
   "`btoa`); a return over 48,000 bytes fails and discards the run's canvas edits. To see a frame, call " +
   "`await node.screenshot({ scale })` inside the script and return only IDs or 'ok'; the image arrives as a separate " +
-  "image part (show it in codemode with `image(part)`). Or use the get_screenshot tool.";
+  "image part (show it in codemode with `image(part)`). Or use the get_screenshot tool. When looking layers up by " +
+  "name, filter by type too (`n.type === 'FRAME' && n.name === '...'`): section titles are often TEXT layers named " +
+  "like their FRAME. Look nodes up again after `remove()` or `detachInstance()` instead of reusing earlier references " +
+  "or IDs. A failed run discards all of its canvas edits.";
 
 const FIGMA_SERVER = /mcp__[A-Za-z0-9_]*figma/i;
 
@@ -58,10 +64,143 @@ export function configuredServerNames(cwd, home = os.homedir()) {
   return names;
 }
 
+// APIs the use_figma runtime rejects (each reproduced), with what to do instead.
+const UNSUPPORTED = {
+  loadAllPagesAsync: "Load a page with `await page.loadAsync()`, or switch to it with `await figma.setCurrentPageAsync(page)`.",
+  setFileThumbnailNodeAsync: "The file thumbnail cannot be set from a script; ask the user to set it in Figma.",
+  setPluginData: "Use `setSharedPluginData(namespace, key, value)` instead.",
+  getPluginData: "Use `getSharedPluginData(namespace, key)` instead.",
+  setRangeOpenTypeFeatures: "OpenType features cannot be set from a script; leave them out or ask the user.",
+};
+const UNSUPPORTED_CALL = new RegExp(`\\.\\s*(${Object.keys(UNSUPPORTED).join("|")})\\s*\\(`);
+
+// The script's first syntax error, with its line, or undefined when it parses.
+// It is only compiled, never run.
+export function syntaxError(code) {
+  try {
+    new vm.Script(`(async () => {\n${code}\n})`, { filename: "figma-script" });
+    return undefined;
+  } catch (error) {
+    if (error?.name !== "SyntaxError") return undefined;
+    const line = /figma-script:(\d+)/.exec(String(error.stack))?.[1];
+    return `${error.message}${line ? ` (line ${Number(line) - 1})` : ""}`;
+  }
+}
+
 export function check(toolName, input) {
   if (!FIGMA_TOOL.test(String(toolName ?? ""))) return undefined;
   if (typeof input?.code !== "string") return undefined;
-  return BASE64.test(input.code) ? { block: true, reason: REASON } : undefined;
+  if (BASE64.test(input.code)) return { block: true, reason: REASON };
+  const api = UNSUPPORTED_CALL.exec(input.code)?.[1];
+  if (api) {
+    return {
+      block: true,
+      reason: `Blocked: \`${api}\` is not supported in use_figma scripts; Figma rejects it and discards the run's canvas edits. ${UNSUPPORTED[api]}`,
+    };
+  }
+  const syntax = syntaxError(input.code);
+  if (syntax) {
+    return {
+      block: true,
+      reason:
+        `Blocked: this Figma script does not parse (SyntaxError: ${syntax}), so nothing was sent to Figma. ` +
+        "When joining helper snippets, wrap each block in `{ }` or rename duplicate `const` names.",
+    };
+  }
+  return undefined;
+}
+
+// Added to failed Figma script results so the agent fixes the actual cause on
+// its next try. Each matches an error reproduced in Figma.
+const MARK = "[figma-return-guard]";
+
+export const ROLLBACK_NOTE =
+  `${MARK} This run failed, so Figma discarded all of its canvas edits: nothing it created or changed is on the ` +
+  "canvas, and IDs it created do not exist. Fix the script and run it again in full; do not clean up or delete " +
+  "anything because of this failure.";
+
+export const LOOKUP_GUIDANCE =
+  `${MARK} A lookup returned nothing or the wrong kind of node, or the property does not exist on that node type. ` +
+  "Section titles are often TEXT layers named like their FRAME, so filter by type: " +
+  "`findOne(n => n.type === 'FRAME' && n.name === '...')`, with parentheses around each `||` alternative. Check the " +
+  "result (and `'prop' in node`) before using it. Inside instances, hidden layers are skipped unless the script sets " +
+  "`figma.skipInvisibleInstanceChildren = false` first.";
+
+export const MISSING_NODE_GUIDANCE =
+  `${MARK} The script used a node that no longer exists. Usual causes: it was removed earlier in the same script ` +
+  "(`remove()`, a removed parent, a helper that replaces a node by name, a connector removed with its shape); a " +
+  "`detachInstance()` replaced the instance's layers, so earlier references and IDs inside it (IDs starting with " +
+  "'I') are gone; or the ID came from an earlier failed run. Look nodes up again after `remove()` or " +
+  "`detachInstance()` instead of reusing references or IDs.";
+
+export const UNSUPPORTED_GUIDANCE =
+  `${MARK} This API is not available in use_figma scripts. Do not retry it; use the alternative Figma's message ` +
+  "suggests, or another approach (for example `setSharedPluginData` instead of `setPluginData`, or " +
+  "`figma.createFrame()` with `layoutMode` instead of `createAutoLayout`).";
+
+export const INSTANCE_GUIDANCE =
+  `${MARK} This layer is inside an instance (its ID starts with 'I'), where position, size and structure are locked. ` +
+  "Change it in the main component, through the instance's component properties (`setProperties`), or detach the " +
+  "instance first (`detachInstance()`, then look its layers up again).";
+
+export const SELECTOR_GUIDANCE =
+  `${MARK} Quote attribute values in \`query()\` selectors when they have spaces or non-ASCII characters: ` +
+  '`FRAME[name^="Botão"]`, not `FRAME[name^=Botão]`.';
+
+export const NAN_GUIDANCE =
+  `${MARK} A computed value is NaN. Check the helper that built it, for example a hex color helper given a 3-digit ` +
+  "color such as '#555' (write '#555555').";
+
+export const COMPONENT_REF_GUIDANCE =
+  `${MARK} \`componentPropertyReferences\` works only on layers already inside a component. Append the layer to the ` +
+  "component first, then set the references.";
+
+export const SYNTAX_GUIDANCE =
+  `${MARK} The script does not parse. A common cause is a \`const\` declared twice after joining helper snippets; ` +
+  "wrap each block in `{ }` or rename the duplicate.";
+
+// Most specific first.
+const ADVICE = [
+  [/The node with id "[^"]+" does not exist/, MISSING_NODE_GUIDANCE],
+  [/cannot be overridden in an instance/, INSTANCE_GUIDANCE],
+  [/Invalid selector/, SELECTOR_GUIDANCE],
+  [/failed validation: Expected number, received nan/i, NAN_GUIDANCE],
+  [/Can only set component property references/, COMPONENT_REF_GUIDANCE],
+  [/is not a supported API|is not supported in this host runtime|\bfigma\.[\w.]+ is not a function|not implemented/, UNSUPPORTED_GUIDANCE],
+  [/^SyntaxError\b/m, SYNTAX_GUIDANCE],
+  [/no such property '[^']+' on [A-Z_]+ node|cannot (read|set) property '[^']+' of (undefined|null)/, LOOKUP_GUIDANCE],
+];
+
+// Errors raised by a script that ran in Figma. Argument validation errors,
+// timeouts (the run may still finish) and blocked calls never ran there.
+const SCRIPT_ERROR = /PLUGIN_\d+_SOURCE|^(Type|Syntax|Reference|Range)Error\b|^Error: in \w+:/m;
+const NOT_A_SCRIPT_ERROR = /^Blocked:|48000-byte limit|timed out|Validation failed for tool/m;
+
+// The script line an error points at, cut around the column when it is long.
+function failingLine(text, code) {
+  const m = /PLUGIN_\d+_SOURCE:(\d+):(\d+)/.exec(text);
+  if (!m || typeof code !== "string") return undefined;
+  const lines = code.split("\n");
+  const n = Number(m[1]);
+  if (n < 1 || n > lines.length) return undefined;
+  let line = lines[n - 1].trim();
+  if (line.length > 240) {
+    const col = Number(m[2]);
+    const raw = lines[n - 1];
+    line = `…${raw.slice(Math.max(0, col - 120), col + 120)}…`;
+  }
+  return `${MARK} The error is on line ${n}: ${line}`;
+}
+
+export function guidance(toolName, isError, content, code) {
+  if (!isError || !FIGMA_TOOL.test(String(toolName ?? "")) || !Array.isArray(content)) return undefined;
+  const text = content.map((p) => (p?.type === "text" ? p.text : "")).join("\n");
+  if (text.includes(MARK) || NOT_A_SCRIPT_ERROR.test(text) || !SCRIPT_ERROR.test(text)) return undefined;
+  const advice = ADVICE.find(([pattern]) => pattern.test(text))?.[1];
+  const notes = [failingLine(text, code), advice, ROLLBACK_NOTE].filter(Boolean).join("\n\n");
+  // Into the error's own text part, so scripts that read only that part see it.
+  const at = content.findIndex((p) => p?.type === "text" && SCRIPT_ERROR.test(p.text));
+  return { content: content.map((p, i) => (i === at ? { ...p, text: `${p.text}\n\n${notes}` } : p)) };
 }
 
 export default function (pi) {
@@ -86,4 +225,5 @@ export default function (pi) {
     return { message: { customType: "figma-return-guard", content: HINT, display: false } };
   });
   pi.on("tool_call", (event) => check(event?.toolName, event?.input));
+  pi.on("tool_result", (event) => guidance(event?.toolName, event?.isError, event?.content, event?.input?.code));
 }
