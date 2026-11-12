@@ -1,0 +1,40 @@
+# pi-figma-return-guard
+
+Pi extension that stops Figma MCP `use_figma` scripts from returning images as base64.
+
+Figma's remote MCP server rejects a `use_figma` call whose `return` value is larger than 48,000 bytes:
+
+```
+Return value exceeds the 48000-byte limit (94070 bytes). Canvas edits from this run were not committed.
+```
+
+Every canvas edit the script made in that run is discarded too. Agents hit this most often by exporting a frame with `exportAsync` and returning it as a base64 data URL so they can look at it. Even a small screenshot is over the limit once it is base64.
+
+The extension checks each Figma MCP tool call before it runs. When the script calls `base64Encode` or `btoa`, the call is blocked and the agent gets this instead:
+
+> Blocked: this Figma script encodes data as base64 (base64Encode or btoa). [...] Inside the script call `await node.screenshot({ scale })`; the image comes back as a separate image part of the result that does not count toward the limit. Return only IDs or 'ok', then show the image in codemode with `image(result.content.find(p => p.type === 'image'))`. Or call the Figma MCP get_screenshot tool, which returns a URL.
+
+Nothing reaches Figma, so no edit is lost, and the agent switches to `node.screenshot()` on its next try.
+
+## What it checks
+
+- **Tools:** any tool of an MCP server whose name contains `figma` (`mcp__figma__*`, `mcp__figma_linux_next__*`, hash-suffixed names) and that receives a `code` string. Tools without `code`, such as `get_screenshot`, always pass.
+- **Code:** `base64Encode` (including `figma['base64Encode']`, `base64Encode?.(...)` and aliases) and `btoa(`. `base64Decode`, used to insert images, is allowed.
+- It also covers calls made from inside a `codemode` script.
+
+The word `base64Encode` in a comment or a string is blocked too; the agent removes it and retries.
+
+## Install
+
+```
+pi install git:github.com/viniciosrab/pi-figma-return-guard
+```
+
+Or add the local checkout to `packages` in `~/.pi/agent/settings.json`. Run `/reload` in sessions that are already open.
+
+## Develop
+
+```
+npm test
+git config core.hooksPath .githooks   # once per clone: run the tests before every commit
+```
