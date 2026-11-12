@@ -3,8 +3,8 @@
 // edit of that run; base64 screenshots were the cause of every such failure.
 // `await node.screenshot()` sends the image as a separate MCP image part that
 // does not count toward the limit, so the guard points the agent there.
-// It also tells the agent this up front, in the system prompt, whenever a
-// Figma MCP server is configured.
+// It also tells the agent this up front, once per session, in a hidden
+// message, whenever a Figma MCP server is configured.
 // Tests: npm test
 // @ts-nocheck
 
@@ -36,11 +36,12 @@ const FIGMA_SERVER = /mcp__[A-Za-z0-9_]*figma/i;
 
 // `figmaConfigured` reports whether any Figma MCP tool exists; the prompt's
 // mcp_servers list is not always part of the system prompt the hook sees.
-export function hint(systemPrompt, figmaConfigured = false) {
-  if (typeof systemPrompt !== "string") return undefined;
-  if (!figmaConfigured && !FIGMA_SERVER.test(systemPrompt)) return undefined;
-  if (systemPrompt.includes(HINT)) return undefined;
-  return { systemPrompt: systemPrompt + "\n\n" + HINT };
+// Whether the hint belongs in this run: a user prompt in a session that has a
+// Figma MCP server (listed in the prompt, registered as tools, or configured).
+export function wantsHint(event, figmaConfigured = false) {
+  if (event?.messageType !== "user") return false;
+  const prompt = typeof event?.systemPrompt === "string" ? event.systemPrompt : "";
+  return figmaConfigured || FIGMA_SERVER.test(prompt);
 }
 
 // Names of the MCP servers in the global and project mcp.json files.
@@ -72,6 +73,17 @@ export default function (pi) {
     } catch {}
     return configuredServerNames(cwd).some((name) => /figma/i.test(name));
   };
-  pi.on("before_agent_start", (event, ctx) => hint(event?.systemPrompt, figmaConfigured(ctx?.cwd ?? process.cwd())));
+  // The hint goes in as a hidden conversation message, once per session: every
+  // provider receives it, including ones (such as claude-bridge) that rebuild
+  // the system prompt and drop prompt changes made by extensions.
+  let hinted = false;
+  pi.on("session_start", () => {
+    hinted = false;
+  });
+  pi.on("before_agent_start", (event, ctx) => {
+    if (hinted || !wantsHint(event, figmaConfigured(ctx?.cwd ?? process.cwd()))) return undefined;
+    hinted = true;
+    return { message: { customType: "figma-return-guard", content: HINT, display: false } };
+  });
   pi.on("tool_call", (event) => check(event?.toolName, event?.input));
 }
