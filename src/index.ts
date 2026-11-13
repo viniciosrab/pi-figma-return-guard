@@ -178,7 +178,8 @@ export const UNSUPPORTED_GUIDANCE =
   "`figma.createFrame()` with `layoutMode` instead of `createAutoLayout`).";
 
 export const INSTANCE_GUIDANCE =
-  `${MARK} This layer is inside an instance (its ID starts with 'I'), where position, size and structure are locked. ` +
+  `${MARK} This layer is inside an instance (its ID starts with 'I'), where position, size and structure are locked: ` +
+  "layers cannot be added, moved or removed there. " +
   "Change it in the main component, through the instance's component properties (`setProperties`), or detach the " +
   "instance first (`detachInstance()`, then look its layers up again).";
 
@@ -201,7 +202,7 @@ export const SYNTAX_GUIDANCE =
 // Most specific first.
 const ADVICE = [
   [/The node with id "[^"]+" does not exist/, MISSING_NODE_GUIDANCE],
-  [/cannot be overridden in an instance/, INSTANCE_GUIDANCE],
+  [/cannot be overridden in an instance|is an instance or is inside of an instance/, INSTANCE_GUIDANCE],
   [/Invalid selector/, SELECTOR_GUIDANCE],
   [/failed validation: Expected number, received nan/i, NAN_GUIDANCE],
   [/Can only set component property references/, COMPONENT_REF_GUIDANCE],

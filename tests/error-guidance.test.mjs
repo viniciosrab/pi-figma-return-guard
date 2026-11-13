@@ -37,6 +37,7 @@ const cases = [
   ["unsupported in host runtime", "Error: in setPluginData: figma.setPluginData is not supported in this host runtime (only private plugins on web can use it).", mod.UNSUPPORTED_GUIDANCE],
   ["not a function", "TypeError: figma.createAutoLayout is not a function", mod.UNSUPPORTED_GUIDANCE],
   ["instance override", "Error: in set_y: This property cannot be overridden in an instance: relative-transform", mod.INSTANCE_GUIDANCE],
+  ["instance structure", "Error: in appendChild: Cannot move node. New parent is an instance or is inside of an instance\n    at <anonymous> (PLUGIN_1_SOURCE:95:346)", mod.INSTANCE_GUIDANCE],
   ["selector", "Error: in query: Invalid selector: unexpected character (0xc3) at position 15", mod.SELECTOR_GUIDANCE],
   ["NaN value", 'Error: in set_fills: Property "fills" failed validation: Expected number, received nan at [0].color.b', mod.NAN_GUIDANCE],
   ["component reference", "Error: in set_componentPropertyReferences: Can only set component property references on symbol sublayer", mod.COMPONENT_REF_GUIDANCE],
