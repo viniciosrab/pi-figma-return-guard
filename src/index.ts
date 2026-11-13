@@ -16,7 +16,10 @@ import os from "node:os";
 import path from "node:path";
 import vm from "node:vm";
 import crypto from "node:crypto";
-import { normalizeError, record } from "./journal.ts";
+import { spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
+import { normalizeError, readJournal, record } from "./journal.ts";
+import { hintLessons, learningOn, readLessons } from "./lessons.ts";
 
 // Any tool of a Figma MCP server (figma, figma-linux-next, figma-desktop, hash
 // suffixes) that takes a `code` script; get_screenshot has no `code` and passes.
@@ -264,39 +267,120 @@ function errorLine(text, code) {
   return typeof code === "string" && n >= 1 && n <= code.split("\n").length ? n : null;
 }
 
-export function guidance(toolName, isError, content, code) {
+// Put before a lesson the background reviewer learned from an earlier failure.
+export const LEARNED_NOTE = `${MARK} Learned from an earlier failure with this same error (check that it applies here):`;
+
+// What the extension knows about a failed Figma script: its error class and
+// the advice for it, built in or learned. Undefined when the result is not a
+// script error.
+function analyze(toolName, isError, content) {
   if (!isError || !FIGMA_TOOL.test(String(toolName ?? "")) || !Array.isArray(content)) return undefined;
   const text = textOf(content);
   if (!isScriptError(text)) return undefined;
-  const advice = ADVICE.find(([pattern]) => pattern.test(text))?.[1];
-  const notes = [failingLine(text, code), advice, ROLLBACK_NOTE].filter(Boolean).join("\n\n");
+  const cls = normalizeError(text);
+  const builtin = ADVICE.find(([pattern]) => pattern.test(text));
+  if (builtin) return { text, class: cls, key: builtin[2], advice: builtin[1] };
+  const lesson = readLessons().get(cls)?.lesson;
+  return lesson
+    ? { text, class: cls, key: "learned", advice: `${LEARNED_NOTE} ${lesson}` }
+    : { text, class: cls, key: "none", advice: undefined };
+}
+
+function advise(info, content, code) {
+  const notes = [failingLine(info.text, code), info.advice, ROLLBACK_NOTE].filter(Boolean).join("\n\n");
   // Into the error's own text part, so scripts that read only that part see it.
   const at = content.findIndex((p) => p?.type === "text" && SCRIPT_ERROR.test(p.text));
   return { content: content.map((p, i) => (i === at ? { ...p, text: `${p.text}\n\n${notes}` } : p)) };
 }
 
+export function guidance(toolName, isError, content, code) {
+  const info = analyze(toolName, isError, content);
+  return info && advise(info, content, code);
+}
+
 // One journal entry per Figma script result; never the code or the error text.
-function journalResult(event, session) {
+function journalResult(event, session, info) {
   const tool = event?.toolName;
   const code = event?.input?.code;
   if (!FIGMA_TOOL.test(String(tool ?? "")) || typeof code !== "string") return;
   const text = textOf(event?.content);
   if (/^Blocked:/.test(text.trim())) return; // already journaled by tool_call
   const ok = !event?.isError;
-  const scriptError = !ok && isScriptError(text);
   record({
     kind: "result",
     session,
     tool,
     ok,
     class: ok ? null : normalizeError(text),
-    line: scriptError ? errorLine(text, code) : null,
-    advice: scriptError ? (ADVICE.find(([pattern]) => pattern.test(text))?.[2] ?? "none") : null,
-    scriptError,
+    line: info ? errorLine(text, code) : null,
+    advice: info ? info.key : null,
+    scriptError: Boolean(info),
   });
 }
 
-export default function (pi) {
+// What the agent wrote (text and thinking) after a moment in the turn.
+function notesSince(ctx, at) {
+  try {
+    const out = [];
+    for (const entry of ctx.sessionManager.getBranch()) {
+      const m = entry?.message;
+      if (entry?.type !== "message" || m?.role !== "assistant" || !Array.isArray(m.content)) continue;
+      if ((Date.parse(entry.timestamp) || Number(m.timestamp) || 0) < at) continue;
+      for (const part of m.content) {
+        if (part?.type === "text" && part.text) out.push(part.text);
+        if (part?.type === "thinking" && part.thinking) out.push(part.thinking);
+      }
+    }
+    return out.join("\n").slice(0, 3000);
+  } catch {
+    return "";
+  }
+}
+
+// Starts the background reviewer (scripts/learn.mjs) on one episode and does
+// not wait for it. The episode goes through an already-unlinked file: it never
+// stays on disk, and it survives Pi exiting right after this (`pi -p`).
+function launchLearner(episode) {
+  const script = fileURLToPath(new URL("../scripts/learn.mjs", import.meta.url));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "figma-guard-learn-"));
+  const file = path.join(dir, "episode.json");
+  fs.writeFileSync(file, JSON.stringify(episode), { mode: 0o600 });
+  const fd = fs.openSync(file, "r");
+  fs.unlinkSync(file);
+  fs.rmdirSync(dir);
+  try {
+    const node = process.env.FIGMA_GUARD_NODE || "node";
+    const child = spawn(node, ["--experimental-strip-types", "--no-warnings", script], { detached: true, stdio: [fd, "ignore", "ignore"] });
+    child.on("error", () => {});
+    child.unref();
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+// Lessons whose errors keep repeating across sessions, for the hint.
+function learnedHint() {
+  try {
+    const lessons = readLessons();
+    if (!lessons.size) return "";
+    const list = hintLessons(readJournal().entries, lessons);
+    if (!list.length) return "";
+    return ` Learned from errors that kept repeating in earlier sessions: ${list.map((l, i) => `(${i + 1}) ${l}`).join(" ")}`;
+  } catch {
+    return "";
+  }
+}
+
+const MAX_EPISODES = 3;
+const MAX_AFTER = 3;
+
+export default createExtension();
+
+export function createExtension({ launch = launchLearner } = {}) {
+  return (pi) => extension(pi, launch);
+}
+
+function extension(pi, launch) {
   // MCP servers connect in the background, so on the first prompt their tools
   // may not be registered yet; the configured server names are known already.
   const figmaConfigured = (cwd) => {
@@ -310,8 +394,30 @@ export default function (pi) {
   // the system prompt and drop prompt changes made by extensions.
   let hinted = false;
   let session = crypto.randomUUID?.() ?? String(Date.now());
+  // Errors of the current turn that have no advice yet, held in memory until
+  // the turn ends. If the agent got past one, the background reviewer may
+  // learn a lesson from it; nothing here reaches the agent's session.
+  let episodes = [];
+  const track = (event, info) => {
+    const tool = event?.toolName;
+    const code = event?.input?.code;
+    if (!FIGMA_TOOL.test(String(tool ?? "")) || typeof code !== "string") return;
+    const ok = !event?.isError;
+    const text = textOf(event?.content).split(MARK)[0].trim();
+    if (/^Blocked:/.test(text)) return;
+    for (const episode of episodes) {
+      if (ok) episode.recovered = true;
+      if (episode.after.length < MAX_AFTER) {
+        episode.after.push({ code: code.slice(0, 6000), outcome: ok ? "ok" : `failed: ${normalizeError(text)}` });
+      }
+    }
+    if (ok || info?.key !== "none") return;
+    if (episodes.length >= MAX_EPISODES || episodes.some((e) => e.class === info.class) || !learningOn()) return;
+    episodes.push({ class: info.class, error: text.slice(0, 800), failing: code.slice(0, 12000), at: Date.now(), after: [], recovered: false });
+  };
   pi.on("session_start", () => {
     hinted = false;
+    episodes = [];
     try {
       session = crypto.randomUUID();
     } catch {}
@@ -319,7 +425,19 @@ export default function (pi) {
   pi.on("before_agent_start", (event, ctx) => {
     if (hinted || !wantsHint(event, figmaConfigured(ctx?.cwd ?? process.cwd()))) return undefined;
     hinted = true;
-    return { message: { customType: "figma-return-guard", content: HINT, display: false } };
+    return { message: { customType: "figma-return-guard", content: HINT + learnedHint(), display: false } };
+  });
+  pi.on("agent_settled", (event, ctx) => {
+    const done = episodes;
+    episodes = [];
+    if (event?.aborted) return;
+    for (const episode of done) {
+      if (!episode.recovered) continue;
+      try {
+        const { class: cls, error, failing, after, at } = episode;
+        launch({ class: cls, error, failing, notes: notesSince(ctx, at), after });
+      } catch {}
+    }
   });
   pi.on("tool_call", (event) => {
     const { result, blocked, fixes } = inspect(event?.toolName, event?.input);
@@ -329,10 +447,13 @@ export default function (pi) {
     return result;
   });
   pi.on("tool_result", (event) => {
-    const result = guidance(event?.toolName, event?.isError, event?.content, event?.input?.code);
+    const info = analyze(event?.toolName, event?.isError, event?.content);
     try {
-      journalResult(event, session);
+      journalResult(event, session, info);
     } catch {}
-    return result;
+    try {
+      track(event, info);
+    } catch {}
+    return info && advise(info, event.content, event.input?.code);
   });
 }

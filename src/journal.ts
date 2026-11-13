@@ -120,6 +120,10 @@ export function formatReport(summary) {
   const covered = summary.classes.filter((c) => c.covered);
   if (notCovered.length) out.push("", "Not covered yet (the agent got no specific advice):", header, ...notCovered.map(row));
   if (covered.length) out.push("", "Covered:", header, ...covered.map(row));
+  if (summary.lessons?.length) {
+    out.push("", `Lessons learned: ${summary.lessons.length}`, "  status    sessions  error");
+    for (const l of summary.lessons) out.push(`  ${l.status.padEnd(8)}  ${String(l.sessions).padStart(8)}  ${l.class}`);
+  }
   return out.join("\n");
 }
 

@@ -48,6 +48,20 @@ The extension keeps a local journal of Figma script calls, so repeated errors ca
 
 `npm run report` prints the total of calls, the error rate, blocks and fixes, and each error class with how many times it happened, in how many sessions, how often the agent recovered and how many extra calls that took. Classes the extension has no advice for are listed first, under "Not covered yet".
 
+## Learning from new errors
+
+When a Figma script fails with an error the extension has no advice for, and the agent gets past it later in the same turn, the extension learns a lesson from it without involving the agent:
+
+1. When the turn ends, it starts a background process and does not wait for it. The agent's session never sees it.
+2. That process asks a model (`claude -p`, default `claude-opus-5-5`) with no tools, no settings, no MCP servers and no saved session for one general rule, given the error, the failing script, what the agent wrote afterwards and the scripts it ran next. The model may answer that there is no clear rule.
+3. The rule is saved to `~/.pi/agent/figma-return-guard/lessons.jsonl` only if it passes a check: one line of 30-400 characters, with no links, tags, code fences, node IDs, shell or credential words, or text about instructions. The same check runs every time lessons are read.
+4. The next time the same error happens, in any session, the lesson is added to the error text, labeled as learned. Built-in advice always wins.
+5. When a learned error still happens in 3 different sessions, its lesson is also told up front in the session-start hint (at most 8 lessons, 1200 characters). If the error then happens in 3 more sessions, the lesson leaves the hint, because telling it up front did not prevent it.
+
+Limits: one reviewer at a time, 5 attempts a day, and at most 2 failed attempts per kind of error. `learn.log` records each attempt's outcome, never the script or the answer. The script and notes sent to the model can contain names from your design; they go to the same provider your Claude sessions already use, and are never written to disk.
+
+To stop learning, write `off` to `~/.pi/agent/figma-return-guard/learn.mode` or set `FIGMA_GUARD_LEARN=off`; lessons already learned keep being used. To remove a lesson, delete its line or append `{"class": "<its class>", "retired": true}`. `FIGMA_GUARD_LEARN_MODEL`, `FIGMA_GUARD_LEARN_DAILY_CAP` and `FIGMA_GUARD_LEARN_CMD` change the model, the daily cap and the CLI. `npm run report` lists each lesson and where it stands.
+
 ## What it checks
 
 - **Tools:** any tool of an MCP server whose name contains `figma` (`mcp__figma__*`, `mcp__figma_linux_next__*`, hash-suffixed names) and that receives a `code` string. Tools without `code`, such as `get_screenshot`, always pass.
