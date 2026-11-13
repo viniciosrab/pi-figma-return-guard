@@ -341,6 +341,9 @@ const afterL = Array.from({ length: 2 }, (_, i) => ({ ...err(`new${i}`, "A"), ts
 check("only sessions after the lesson was saved count", lessons.standing([...before, ...afterL], dated)[0].sessions === 2 && lessons.standing([...before, ...afterL], dated)[0].status === "learned");
 check("successes and classes without a lesson do not count",
   standingOf([...sessions(2), { ...err("s9", "A"), ok: true }, ...sessions(3, "Z")]).sessions === 2);
+const handMade = new Map([["A", { class: "A", lesson: INJECTION }], ["B", { class: "B", lesson: GOOD }]]);
+check("the hint validates each lesson again, whatever built the list",
+  JSON.stringify(lessons.hintLessons([...sessions(3), ...sessions(3, "B")], handMade)) === JSON.stringify([GOOD]));
 check("only lessons standing as hint go to the hint",
   JSON.stringify(lessons.hintLessons([...sessions(3), ...sessions(1, "B")], known)) === JSON.stringify([GOOD]));
 const many = new Map(Array.from({ length: 12 }, (_, i) => [`C${i}`, { class: `C${i}`, lesson: `${"Rule about Figma scripts. ".repeat(10)}${i}`, approved: true }]));

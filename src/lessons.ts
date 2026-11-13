@@ -140,7 +140,7 @@ export function readLessons() {
 // The lessons in the order `npm run lessons` numbers them.
 export const numbered = () => [...readLessons().values()];
 
-// Approves or retires lesson number `n` (1-based). Returns what happened.
+// Retires lesson number `n` (1-based). Returns what happened.
 function mark(n, entry) {
   const lesson = numbered()[Number(n) - 1];
   if (!lesson) return "missing";
@@ -211,10 +211,12 @@ export function hintLessons(entries, lessons) {
   const out = [];
   let chars = 0;
   for (const s of standing(entries, lessons)) {
-    if (s.status !== "hint") continue;
-    if (out.length >= HINT_MAX_LESSONS || chars + s.lesson.length > HINT_MAX_CHARS) break;
-    out.push(s.lesson);
-    chars += s.lesson.length;
+    // Checked again here: the hint reaches every session with no one reading it.
+    const lesson = validateLesson(s.lesson);
+    if (s.status !== "hint" || !lesson) continue;
+    if (out.length >= HINT_MAX_LESSONS || chars + lesson.length > HINT_MAX_CHARS) break;
+    out.push(lesson);
+    chars += lesson.length;
   }
   return out;
 }
