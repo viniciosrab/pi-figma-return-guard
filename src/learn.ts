@@ -89,7 +89,7 @@ function acquire(lock, waitMs) {
 
 // Returns what happened: "saved", "none" (the reviewer saw no clear rule),
 // "rejected" (its answer is not a valid lesson), "error", or why it did not
-// run: "invalid", "off", "busy", "exists", "cap", "gave-up".
+// run: "invalid", "off", "busy", "exists", "retired", "cap", "gave-up".
 export function learn(payload, { run = runModel, waitMs = 90000 } = {}) {
   const cls = payload?.class;
   if (typeof cls !== "string" || !cls) return "invalid";
@@ -119,7 +119,7 @@ export function learn(payload, { run = runModel, waitMs = 90000 } = {}) {
       const { class: _class, ...episode } = payload;
       const answer = String(run(JSON.stringify(episode), config) ?? "").trim();
       const lesson = validateLesson(answer);
-      if (/^none\b/i.test(answer)) status = "none";
+      if (/^none\s*([.,:;!-]|$)/i.test(answer)) status = "none";
       else if (!lesson) status = "rejected";
       else {
         appendLine(lessonsPath(), { v: 1, ts: new Date().toISOString(), class: cls, lesson, model: config.model });

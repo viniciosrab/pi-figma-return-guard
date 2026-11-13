@@ -31,12 +31,14 @@ const PLAIN = /^[\x20-\x7e]+$/;
 const FORBIDDEN = [
   // links
   /:\/\/|\bwww\.|\]\(|\b[a-z0-9-]+(\.[a-z0-9-]+)+\/|\b[a-z0-9-]+\.(com|net|org|io|dev|app|xyz|ru|cn|co|me|info|sh|ly)\b/i,
-  /```|<|&#?\w+;/, // code fences, tags, entities
+  /```|<\s*[\/!a-z]|&#?\w+;/i, // code fences, tags, entities
+  /\blocalhost\b|\b\d{1,3}(\.\d{1,3}){3}\b|~\/|\.\.\/|[A-Za-z0-9+\/]{32,}={0,2}/, // hosts, IPs, paths, base64
   /\bI?\d+\s*[:;]\s*\d+\b/, // node IDs: a lesson is general
-  /\b(curl|wget|sudo|ssh|bash|zsh|sh|fish|shell|terminal|npm|npx|pip|rm|chmod|eval|exec|passwords?|credentials?|secrets?|tokens?|private keys?|api[ _-]?keys?|keychain)\b|\.env\b|\s-c\b/i,
+  /\b(curl|wget|sudo|ssh|bash|zsh|sh|fish|shell|terminal|npm|npx|pip|rm|chmod|eval|exec|passwords?|credentials?|secrets?|(access|auth|bearer|api|refresh|session) tokens?|cookies?|passphrases?|private keys?|api[ _-]?keys?|keychain)\b|\.env\b|\s-c\b/i,
   /\b(delete|remove|erase|wipe|overwrite)\b.{0,40}\b(files?|folders?|director(y|ies)|projects?|repositor(y|ies)|disk|home)\b/i,
   /\b(system prompt|instructions?|disregard|forget|ignore|you must now|from now on|new rule|rules? above)\b|\bas (the|an|your) (assistant|ai|agent|model)\b|\bthe user (says|said|wants|asked|requires)\b|\btold (you )?before\b/i,
-  /^none\b/i,
+  /\bpay no attention\b|\byour (real|actual|true) (task|job|goal)\b|\breply only\b|\brespond only\b|\bdeveloper mode\b|^\s*\[\s*system\s*\]|^\s*system\s*:/i,
+  /^none\s*([.,:;!-]|$)/i,
 ];
 
 export function validateLesson(text) {
