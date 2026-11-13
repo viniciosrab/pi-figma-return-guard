@@ -7,7 +7,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
-import { appendLine, dataDir, learningOn, lessonsPath, readLessons, validateLesson } from "./lessons.ts";
+import { appendLine, dataDir, learningOn, lessonsPath, readLessons, readRetired, validateLesson } from "./lessons.ts";
 
 export const PROMPT = [
   "You review one failed Figma plugin script, run through the Figma MCP `use_figma` tool, and how the agent got past the failure. Write the general rule that would have prevented the error, for future agents writing such scripts.",
@@ -64,7 +64,9 @@ function readLog() {
 const sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 
 // One reviewer at a time, across all sessions. A lock left by a reviewer that
-// died is taken over.
+// died is taken over. Known limit: two reviewers that find the same stale lock
+// at the same moment can both run; lessons are single appended lines and the
+// latest one wins, so the worst case is one extra model call.
 function acquire(lock, waitMs) {
   const deadline = Date.now() + waitMs;
   for (;;) {
@@ -94,21 +96,30 @@ export function learn(payload, { run = runModel, waitMs = 90000 } = {}) {
   if (!learningOn()) return "off";
   fs.mkdirSync(dataDir(), { recursive: true, mode: 0o700 });
   const lock = path.join(dataDir(), "learn.lock");
-  if (!acquire(lock, waitMs)) return "busy";
+  const config = settings();
+  if (!acquire(lock, waitMs)) {
+    // Another reviewer is still running; this episode is skipped, and logged.
+    try {
+      appendLine(logPath(), { ts: new Date().toISOString(), class: cls, status: "busy", model: config.model, ms: 0 });
+    } catch {}
+    return "busy";
+  }
   try {
     if (readLessons().has(cls)) return "exists";
-    const config = settings();
-    const attempts = readLog();
-    const today = new Date().toISOString().slice(0, 10);
-    if (attempts.filter((a) => String(a?.ts).startsWith(today)).length >= config.dailyCap) return "cap";
-    if (attempts.filter((a) => a?.class === cls && a.status !== "saved").length >= MAX_FAILED_PER_CLASS) return "gave-up";
+    if (readRetired().has(cls)) return "retired";
+    const attempts = readLog().filter((a) => a?.status !== "busy");
+    const today = new Date().toDateString(); // the local day
+    if (attempts.filter((a) => new Date(a?.ts).toDateString() === today).length >= config.dailyCap) return "cap";
+    // Only answers count against a class; an outage or a missing CLI does not.
+    const failed = attempts.filter((a) => a?.class === cls && (a.status === "none" || a.status === "rejected"));
+    if (failed.length >= MAX_FAILED_PER_CLASS) return "gave-up";
     const started = Date.now();
     let status = "error";
     try {
       const { class: _class, ...episode } = payload;
       const answer = String(run(JSON.stringify(episode), config) ?? "").trim();
       const lesson = validateLesson(answer);
-      if (/^none\.?$/i.test(answer)) status = "none";
+      if (/^none\b/i.test(answer)) status = "none";
       else if (!lesson) status = "rejected";
       else {
         appendLine(lessonsPath(), { v: 1, ts: new Date().toISOString(), class: cls, lesson, model: config.model });

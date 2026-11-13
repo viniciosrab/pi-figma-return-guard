@@ -16,22 +16,55 @@ const LESSON_MIN = 30;
 export const LESSON_MAX = 400;
 
 // A lesson is one plain sentence about Figma scripts. The reviewer writes it
-// from an error and a script that may quote a design, so anything that points
-// elsewhere or reads like an order about something else is refused.
+// from an error and a script that may quote a design, so the check is strict:
+// plain ASCII only (no look-alike letters, hidden or line-breaking characters),
+// and nothing that points elsewhere or reads like an order about something
+// other than Figma scripts. A refused lesson only means one less hint.
+const TYPOGRAPHIC = [
+  [/[\u2018\u2019\u201a\u201b]/g, "'"],
+  [/[\u201c\u201d\u201e\u201f]/g, '"'],
+  [/[\u2013\u2014\u2015]/g, "-"],
+  [/\u2026/g, "..."],
+  [/\u00a0/g, " "],
+];
+const PLAIN = /^[\x20-\x7e]+$/;
 const FORBIDDEN = [
-  /[\u0000-\u001f\u007f]/, // new lines and other control characters
-  /:\/\/|\bwww\./i, // links
-  /```|<\/?[a-z!]/i, // code fences and tags
-  /\bI?\d+:\d+\b/, // node IDs: a lesson is general
-  /\b(curl|wget|sudo|ssh|bash|shell|terminal|npm|pip|passwords?|credentials?|secrets?|api[ _-]?keys?)\b|\.env\b/i,
-  /\bsystem prompt\b|\b(previous|prior|above|earlier) instructions?\b|\bignore (all|any|the|previous|prior)\b/i,
+  // links
+  /:\/\/|\bwww\.|\]\(|\b[a-z0-9-]+(\.[a-z0-9-]+)+\/|\b[a-z0-9-]+\.(com|net|org|io|dev|app|xyz|ru|cn|co|me|info|sh|ly)\b/i,
+  /```|<|&#?\w+;/, // code fences, tags, entities
+  /\bI?\d+\s*[:;]\s*\d+\b/, // node IDs: a lesson is general
+  /\b(curl|wget|sudo|ssh|bash|zsh|sh|fish|shell|terminal|npm|npx|pip|rm|chmod|eval|exec|passwords?|credentials?|secrets?|tokens?|private keys?|api[ _-]?keys?|keychain)\b|\.env\b|\s-c\b/i,
+  /\b(delete|remove|erase|wipe|overwrite)\b.{0,40}\b(files?|folders?|director(y|ies)|projects?|repositor(y|ies)|disk|home)\b/i,
+  /\b(system prompt|instructions?|disregard|forget|ignore|you must now|from now on|new rule|rules? above)\b|\bas (the|an|your) (assistant|ai|agent|model)\b|\bthe user (says|said|wants|asked|requires)\b|\btold (you )?before\b/i,
+  /^none\b/i,
 ];
 
 export function validateLesson(text) {
   if (typeof text !== "string") return undefined;
-  const lesson = text.trim();
-  if (lesson.length < LESSON_MIN || lesson.length > LESSON_MAX) return undefined;
+  let lesson = text.trim();
+  for (const [pattern, plain] of TYPOGRAPHIC) lesson = lesson.replace(pattern, plain);
+  if (lesson.length < LESSON_MIN || lesson.length > LESSON_MAX || !PLAIN.test(lesson)) return undefined;
   return FORBIDDEN.some((pattern) => pattern.test(lesson)) ? undefined : lesson;
+}
+
+// Classes whose lessons the user retired: they are not learned again.
+export function retiredClasses(text) {
+  const retired = new Set();
+  for (const line of String(text ?? "").split("\n")) {
+    try {
+      const entry = JSON.parse(line);
+      if (typeof entry?.class === "string" && entry.retired) retired.add(entry.class);
+    } catch {}
+  }
+  return retired;
+}
+
+export function readRetired() {
+  try {
+    return retiredClasses(fs.readFileSync(lessonsPath(), "utf8"));
+  } catch {
+    return new Set();
+  }
 }
 
 // Error class -> its latest valid lesson. A line with `retired: true` removes
@@ -94,6 +127,9 @@ export function standing(entries, lessons) {
   const counts = new Map();
   for (const e of entries ?? []) {
     if (e?.kind !== "result" || e.ok || !lessons.has(e.class)) continue;
+    // Only errors after the lesson was saved say whether it helps.
+    const savedAt = Date.parse(lessons.get(e.class).ts ?? "");
+    if (savedAt && Date.parse(e.ts ?? "") < savedAt) continue;
     if (!sessions.has(e.class)) sessions.set(e.class, new Set());
     sessions.get(e.class).add(e.session);
     counts.set(e.class, (counts.get(e.class) ?? 0) + 1);

@@ -122,7 +122,7 @@ export function formatReport(summary) {
   if (covered.length) out.push("", "Covered:", header, ...covered.map(row));
   if (summary.lessons?.length) {
     out.push("", `Lessons learned: ${summary.lessons.length}`, "  status    sessions  error");
-    for (const l of summary.lessons) out.push(`  ${l.status.padEnd(8)}  ${String(l.sessions).padStart(8)}  ${l.class}`);
+    for (const l of summary.lessons) out.push(`  ${l.status.padEnd(8)}  ${String(l.sessions).padStart(8)}  ${l.class}`, `            lesson: ${l.lesson}`);
   }
   return out.join("\n");
 }

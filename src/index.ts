@@ -344,10 +344,14 @@ function launchLearner(episode) {
   const script = fileURLToPath(new URL("../scripts/learn.mjs", import.meta.url));
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "figma-guard-learn-"));
   const file = path.join(dir, "episode.json");
-  fs.writeFileSync(file, JSON.stringify(episode), { mode: 0o600 });
-  const fd = fs.openSync(file, "r");
-  fs.unlinkSync(file);
-  fs.rmdirSync(dir);
+  let fd;
+  try {
+    fs.writeFileSync(file, JSON.stringify(episode), { mode: 0o600 });
+    fd = fs.openSync(file, "r");
+  } finally {
+    // The episode never stays on disk, even when writing or opening it failed.
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
   try {
     const node = process.env.FIGMA_GUARD_NODE || "node";
     const child = spawn(node, ["--experimental-strip-types", "--no-warnings", script], { detached: true, stdio: [fd, "ignore", "ignore"] });
