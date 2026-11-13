@@ -394,6 +394,89 @@ const report = journal.formatReport({
 check("the report lists each lesson with its standing and its text",
   /Lessons learned: 2/.test(report) && /hint\s+3\s+A/.test(report) && /learned\s+1\s+B/.test(report) && report.includes(GOOD));
 
+// --- Errors that name nothing -------------------------------------------------
+// "cannot read property of undefined" has many unrelated causes. A lesson for
+// such an error is one known cause, tied to API names the script must use.
+const VAGUE = "TypeError: cannot read property of undefined";
+const VAGUE_ERR = `${VAGUE}\n    at <anonymous> (PLUGIN_1_SOURCE:1:5)`;
+const KIDS = "Hidden instance children are left out of .children when figma.skipInvisibleInstanceChildren is true; find them by name instead of by position.";
+const FILLS = "A node without paints has an empty .fills array, so check its length before reading the first paint of a node.";
+const KIDS_KEY = `${VAGUE} [children]`;
+const FILLS_KEY = `${VAGUE} [fills]`;
+const kidsScript = "const kids = inst.children;\nkids[3][0].remove();";
+const fillsScript = "const paint = node.fills[0][0];";
+const vague = { class: VAGUE, error: VAGUE, failing: kidsScript, notes: "the slot was hidden", after: [] };
+
+check("tells errors that name nothing from errors that name a property or an API",
+  lessons.namesNothing?.(VAGUE) === true && lessons.namesNothing("TypeError: not a function") === true &&
+  lessons.namesNothing(CLASS) === false && lessons.namesNothing("TypeError: cannot read property 'find' of undefined") === false);
+
+reset(); calls = [];
+check("a rule for a vague error without its names is rejected", learner.learn(vague, { run: fake(KIDS) }) === "rejected" && !fs.existsSync(lessonsFile));
+check("the reviewer is asked for the names only for a vague error",
+  /WHEN:/.test(calls[0]?.settings?.prompt ?? "") && calls[0].settings.prompt.startsWith(learner.PROMPT) && !/WHEN:/.test(learner.PROMPT));
+reset(); calls = [];
+check("a name the script does not use is rejected", learner.learn(vague, { run: fake(`${FILLS}\nWHEN: fills`) }) === "rejected" && !fs.existsSync(lessonsFile));
+check("a name the rule does not mention is rejected", learner.learn(vague, { run: fake(`${KIDS}\nWHEN: kids`) }) === "rejected" && !fs.existsSync(lessonsFile));
+check("gives up on a vague error after two answers without a lesson", learner.learn(vague, { run: fake(`${KIDS}\nWHEN: children`) }) === "gave-up" && calls.length === 2);
+fs.writeFileSync(logFile, jsonl(logFile).map((a) => JSON.stringify({ ...a, ts: new Date(Date.now() - 8 * 864e5).toISOString() })).join("\n") + "\n");
+check("a vague error is tried again a week later", learner.learn(vague, { run: fake(`${KIDS}\n\nWHEN: .children, skipInvisibleInstanceChildren`) }) === "saved");
+// The rule mentions skipInvisibleInstanceChildren, but the failing script does not use it.
+check("the lesson of a vague error is saved with the names the script uses",
+  jsonl(lessonsFile).length === 1 && jsonl(lessonsFile)[0].class === VAGUE && JSON.stringify(jsonl(lessonsFile)[0].when) === '["children"]' && jsonl(lessonsFile)[0].lesson === KIDS);
+check("a second cause of the same vague error is learned too",
+  learner.learn({ ...vague, failing: fillsScript }, { run: fake(`${FILLS}\nWHEN: fills`) }) === "saved" &&
+  lessons.readLessons().size === 2 && lessons.readLessons().get(KIDS_KEY)?.lesson === KIDS && lessons.readLessons().get(FILLS_KEY)?.lesson === FILLS);
+check("a cause that is already known is not saved twice",
+  learner.learn(vague, { run: fake(`${KIDS} Again.\nWHEN: children`) }) === "exists" && lessons.readLessons().get(KIDS_KEY).lesson === KIDS);
+
+fresh();
+fs.mkdirSync(data, { recursive: true });
+const vagueLessons = [{ v: 1, class: VAGUE, lesson: KIDS, when: ["children"] }, { v: 1, class: VAGUE, lesson: FILLS, when: ["fills"] }];
+fs.writeFileSync(lessonsFile, vagueLessons.map((l) => JSON.stringify(l)).join("\n") + "\n");
+const seen = (code) => result(VAGUE_ERR, { code })?.content?.[0]?.text ?? "";
+check("a vague error shows only the causes whose names the script uses, as possible causes",
+  typeof mod.KNOWN_CAUSES_NOTE === "string" && seen(kidsScript).includes(`${mod.KNOWN_CAUSES_NOTE} ${KIDS}`) && !seen(kidsScript).includes(FILLS) &&
+  seen(fillsScript).includes(FILLS) && !seen(fillsScript).includes(KIDS) && !seen(kidsScript).includes(mod.LEARNED_NOTE));
+check("a vague error in a script that uses none of the names shows no lesson",
+  !seen("const a = rows[0][1];").includes(KIDS) && !seen("const a = rows[0][1];").includes(FILLS) && !seen("const grandchildren = 1; x[0][1];").includes(KIDS));
+const both = seen(`${kidsScript}\n${fillsScript}`);
+check("a script that uses the names of two causes shows both, the latest first", both.includes(`(1) ${FILLS} (2) ${KIDS}`));
+check("the journal says which lessons were shown",
+  jsonl(journalFile).at(-1)?.advice === "learned" && JSON.stringify(jsonl(journalFile).at(-1).lessons) === JSON.stringify([FILLS_KEY, KIDS_KEY]));
+check("a vague error counts toward the lessons that were shown only",
+  JSON.stringify(lessons.standing([{ ...err("s1", VAGUE), lessons: [KIDS_KEY] }, err("s2", VAGUE)], lessons.readLessons()).map((s) => [s.class, s.sessions])) ===
+  JSON.stringify([[KIDS_KEY, 1], [FILLS_KEY, 0]]));
+
+// A vague error keeps learning: a shown cause may not be the one that applied.
+fresh();
+fs.mkdirSync(data, { recursive: true });
+fs.writeFileSync(lessonsFile, `${JSON.stringify(vagueLessons[0])}\n`);
+result(VAGUE_ERR, { code: kidsScript });
+success();
+settle();
+check("a vague error with a shown cause is still reviewed, with the known causes",
+  launched.length === 1 && launched[0].class === VAGUE && JSON.stringify(launched[0].known) === JSON.stringify([KIDS]));
+fresh();
+fs.mkdirSync(data, { recursive: true });
+fs.writeFileSync(lessonsFile, `${JSON.stringify({ v: 1, class: CLASS, lesson: GOOD })}\n`);
+result(ERR);
+success();
+settle();
+check("an error that names its cause is not reviewed again once it has a lesson", launched.length === 0);
+
+fs.writeFileSync(lessonsFile, `${JSON.stringify({ v: 1, class: VAGUE, lesson: KIDS })}\n`);
+check("a lesson of a vague error saved without names is not used", lessons.readLessons().size === 0 && !seen(kidsScript).includes(KIDS));
+
+fs.writeFileSync(lessonsFile, vagueLessons.map((l) => JSON.stringify(l)).join("\n") + "\n");
+check("approving and retiring by number work for one cause of a vague error",
+  lessons.approveLesson(1) === "approved" && lessons.readLessons().get(KIDS_KEY).approved === true && !lessons.readLessons().get(FILLS_KEY).approved &&
+  lessons.retireLesson(1) === "retired" && !lessons.readLessons().has(KIDS_KEY) && lessons.readLessons().has(FILLS_KEY) && lessons.readRetired().has(KIDS_KEY));
+calls = [];
+check("a retired cause is not learned again", learner.learn(vague, { run: fake(`${KIDS}\nWHEN: children`) }) === "retired" && !lessons.readLessons().has(KIDS_KEY));
+const listedVague = spawnSync(process.execPath, ["--experimental-strip-types", "--no-warnings", at("../scripts/lessons.mjs")], { encoding: "utf8", env: process.env });
+check("npm run lessons names the cause of a vague error", listedVague.status === 0 && listedVague.stdout.includes(`1. ${FILLS_KEY}`));
+
 fs.rmSync(dir, { recursive: true, force: true });
 console.log(failed ? `${failed} lessons checks failed` : "all lessons checks passed");
 process.exit(failed ? 1 : 0);

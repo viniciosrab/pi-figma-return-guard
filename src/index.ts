@@ -19,7 +19,7 @@ import crypto from "node:crypto";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { normalizeError, readJournal, record } from "./journal.ts";
-import { hintLessons, learningOn, readLessons } from "./lessons.ts";
+import { hintLessons, learningOn, lessonsFor, namesNothing, readLessons } from "./lessons.ts";
 
 // Any tool of a Figma MCP server (figma, figma-linux-next, figma-desktop, hash
 // suffixes) that takes a `code` script; get_screenshot has no `code` and passes.
@@ -270,20 +270,28 @@ function errorLine(text, code) {
 // Put before a lesson the background reviewer learned from an earlier failure.
 export const LEARNED_NOTE = `${MARK} Learned from an earlier failure with this same error (check that it applies here):`;
 
+// Put before the lessons of an error whose message names nothing: each is one
+// cause seen before in a script that used the same API, not the explanation.
+export const KNOWN_CAUSES_NOTE =
+  `${MARK} This error message has many possible causes. Learned from earlier failures in scripts that used the same API (check which one applies here, if any):`;
+const MAX_SHOWN = 3;
+
 // What the extension knows about a failed Figma script: its error class and
 // the advice for it, built in or learned. Undefined when the result is not a
 // script error.
-function analyze(toolName, isError, content) {
+function analyze(toolName, isError, content, code) {
   if (!isError || !FIGMA_TOOL.test(String(toolName ?? "")) || !Array.isArray(content)) return undefined;
   const text = textOf(content);
   if (!isScriptError(text)) return undefined;
   const cls = normalizeError(text);
   const builtin = ADVICE.find(([pattern]) => pattern.test(text));
   if (builtin) return { text, class: cls, key: builtin[2], advice: builtin[1] };
-  const lesson = readLessons().get(cls)?.lesson;
-  return lesson
-    ? { text, class: cls, key: "learned", advice: `${LEARNED_NOTE} ${lesson}` }
-    : { text, class: cls, key: "none", advice: undefined };
+  const vague = namesNothing(cls);
+  const found = lessonsFor(readLessons(), cls, code).slice(0, MAX_SHOWN);
+  if (!found.length) return { text, class: cls, key: "none", vague, advice: undefined };
+  const known = found.map((l) => l.lesson);
+  const list = known.length > 1 ? known.map((l, i) => `(${i + 1}) ${l}`).join(" ") : known[0];
+  return { text, class: cls, key: "learned", vague, known, lessons: found.map((l) => l.key), advice: `${vague ? KNOWN_CAUSES_NOTE : LEARNED_NOTE} ${list}` };
 }
 
 function advise(info, content, code) {
@@ -294,7 +302,7 @@ function advise(info, content, code) {
 }
 
 export function guidance(toolName, isError, content, code) {
-  const info = analyze(toolName, isError, content);
+  const info = analyze(toolName, isError, content, code);
   return info && advise(info, content, code);
 }
 
@@ -315,6 +323,7 @@ function journalResult(event, session, info) {
     line: info ? errorLine(text, code) : null,
     advice: info ? info.key : null,
     scriptError: Boolean(info),
+    ...(info?.lessons ? { lessons: info.lessons } : {}),
   });
 }
 
@@ -421,9 +430,11 @@ function extension(pi, launch) {
         episode.after.push({ code: code.slice(0, 6000), outcome: ok ? "ok" : `failed: ${normalizeError(text)}` });
       }
     }
-    if (ok || info?.key !== "none") return;
+    // An error with no advice yet, or a vague one: the causes shown for it
+    // may not be the one that applied, so it keeps being reviewed.
+    if (ok || !info || !(info.key === "none" || (info.key === "learned" && info.vague))) return;
     if (episodes.length >= MAX_EPISODES || episodes.some((e) => e.class === info.class) || !learningOn()) return;
-    episodes.push({ class: info.class, error: text.slice(0, 800), failing: code.slice(0, 12000), at: Date.now(), after: [], recovered: false });
+    episodes.push({ class: info.class, error: text.slice(0, 800), failing: code.slice(0, 12000), at: Date.now(), after: [], recovered: false, ...(info.known ? { known: info.known } : {}) });
   };
   pi.on("session_start", () => {
     hinted = false;
@@ -444,8 +455,8 @@ function extension(pi, launch) {
     for (const episode of done) {
       if (!episode.recovered) continue;
       try {
-        const { class: cls, error, failing, after, at } = episode;
-        launch({ class: cls, error, failing, notes: notesSince(ctx, at), after });
+        const { class: cls, error, failing, after, at, known } = episode;
+        launch({ class: cls, error, failing, notes: notesSince(ctx, at), after, ...(known ? { known } : {}) });
       } catch {}
     }
   });
@@ -457,7 +468,7 @@ function extension(pi, launch) {
     return result;
   });
   pi.on("tool_result", (event) => {
-    const info = analyze(event?.toolName, event?.isError, event?.content);
+    const info = analyze(event?.toolName, event?.isError, event?.content, event?.input?.code);
     try {
       journalResult(event, session, info);
     } catch {}

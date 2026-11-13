@@ -42,7 +42,7 @@ Argument validation errors, timeouts and blocked calls are left alone: a blocked
 
 The extension keeps a local journal of Figma script calls, so repeated errors can be found without anyone relaying screenshots. It appends one JSON line per script result, block or silent fix to `~/.pi/agent/figma-return-guard/journal.jsonl` (or under `PI_CODING_AGENT_DIR`), readable only by you.
 
-- It stores: time, a random id per session, the tool name, whether the call worked, the error class with IDs, numbers and quoted design text removed, the failing line number, which advice was given, and which blocks or fixes were applied.
+- It stores: time, a random id per session, the tool name, whether the call worked, the error class with IDs, numbers and quoted design text removed, the failing line number, which advice was given (for learned lessons, which ones), and which blocks or fixes were applied.
 - It never stores: the script code, the failing line's text, the full error text or anything else from the design.
 - It only appends, so several Pi sessions can write at once. Past 5 MB it moves the file to `journal.1.jsonl`. If writing fails, the tool call goes on unchanged.
 
@@ -58,7 +58,14 @@ When a Figma script fails with an error the extension has no advice for, and the
 4. The next time the same error happens, in any session, the lesson is added to the error text, labeled as learned. Built-in advice always wins.
 5. When a learned error still happens in 3 different sessions, its lesson waits for your approval to be told up front in the session-start hint (at most 8 lessons, 1200 characters). `npm run report` lists the waiting lessons with the command to approve each one. If the error then happens in 3 more sessions after the approval, the lesson leaves the hint, because telling it up front did not prevent it.
 
-Limits: one reviewer at a time (an episode that finds another reviewer running is skipped and logged as `busy`), 5 attempts a local day, and at most 2 answers without a valid lesson per kind of error; errors such as a missing CLI do not count against a kind. Only errors that happen after a lesson was saved count toward its standing. `learn.log` records each attempt's outcome, never the script or the answer. The script and notes sent to the model can contain names from your design; they go to the same provider your Claude sessions already use, and are never written to disk.
+Some error messages name nothing, such as `TypeError: cannot read property of undefined` or `TypeError: not a function`, and the same message has many unrelated causes. For these the extension keeps a list of known causes instead of one lesson:
+
+- The reviewer must tie its rule to one to three Figma API names that the failing script uses and that the rule itself mentions (it answers with a second line, `WHEN: children`). A rule with no such name is not saved.
+- The rule is shown only when a script that fails with that message uses those names: at most 3 rules, the latest first, labeled as possible causes rather than as the explanation.
+- The error keeps being reviewed after it has lessons, so other causes can be learned. The reviewer is told the causes the agent was shown and answers that there is no new rule when one of them explains the failure.
+- `npm run lessons` and `npm run report` list each cause apart, as `TypeError: cannot read property of undefined [children]`. A lesson for such an error saved without names by an older version is not used.
+
+Limits: one reviewer at a time (an episode that finds another reviewer running is skipped and logged as `busy`), 5 attempts a local day, and at most 2 answers without a valid lesson per kind of error (per week for an error that names nothing); errors such as a missing CLI do not count against a kind. Only errors that happen after a lesson was saved count toward its standing. `learn.log` records each attempt's outcome, never the script or the answer. The script and notes sent to the model can contain names from your design; they go to the same provider your Claude sessions already use, and are never written to disk.
 
 To stop learning, write `off` to `~/.pi/agent/figma-return-guard/learn.mode` or set `FIGMA_GUARD_LEARN=off`; lessons already learned keep being used. `npm run lessons` lists the lessons by number; `npm run lessons -- approve <n>` lets lesson n join the hint (the approval binds to that exact text, so a relearned lesson needs a new one), and `npm run lessons -- retire <n>` stops using it for good: it is not learned again. Deleting its line instead lets it be learned again. `FIGMA_GUARD_LEARN_MODEL`, `FIGMA_GUARD_LEARN_DAILY_CAP` and `FIGMA_GUARD_LEARN_CMD` change the model, the daily cap and the CLI. `npm run report` lists each lesson and where it stands.
 

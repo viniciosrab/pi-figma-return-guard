@@ -7,7 +7,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
-import { appendLine, dataDir, isNone, learningOn, lessonsPath, readLessons, readRetired, validateLesson } from "./lessons.ts";
+import { appendLine, dataDir, isNone, learningOn, lessonKey, lessonsPath, namesNothing, readLessons, readRetired, validateLesson, validateWhen } from "./lessons.ts";
 
 export const PROMPT = [
   "You review one failed Figma plugin script, run through the Figma MCP `use_figma` tool, and how the agent got past the failure. Write the general rule that would have prevented the error, for future agents writing such scripts.",
@@ -16,6 +16,14 @@ export const PROMPT = [
   "",
   "Answer with exactly one line of at most 280 characters, in English: the cause and the fix, as a rule about the Figma plugin API or JavaScript. Do not include layer names, node IDs, file names or any other detail of this design, and no advice outside Figma scripts.",
   "If the cause is not clear from the input, or the error is specific to this one design, answer exactly: NONE",
+].join("\n");
+
+// Added for an error whose message names nothing (see namesNothing): its rule
+// is one cause among many, so it must say which API it is about.
+export const VAGUE_PROMPT = [
+  "",
+  "This error message does not name what failed, and the same message has many unrelated causes. So the rule will be shown again only for scripts that use the same API. After the rule, add a second line `WHEN: name` with one to three names, separated by commas: properties or functions of the Figma plugin API that the failing script uses, that the rule is about, and that the rule itself mentions by the same name. If no such name ties the rule to the script, answer exactly: NONE",
+  "`known`, when present, lists the rules already learned for this error that the agent was shown. If one of them already explains this failure, answer exactly: NONE",
 ].join("\n");
 
 const number = (name, fallback) => Number(process.env[name]) || fallback;
@@ -31,15 +39,18 @@ export const settings = () => ({
 
 const logPath = () => path.join(dataDir(), "learn.log");
 const MAX_FAILED_PER_CLASS = 2;
+// A vague error is a new mistake each time, so it is tried again later.
+const VAGUE_RETRY_MS = 7 * 24 * 60 * 60 * 1000;
+const NO_LESSON = ["none", "rejected", "exists", "retired"];
 const STALE_LOCK_MS = 10 * 60 * 1000;
 
 // Asks the model through the Claude Code CLI: no tools, no settings (so no
 // hooks), no MCP servers, no saved session, in an empty directory of its own.
-export function runModel(input, { cmd, model, timeoutMs }) {
+export function runModel(input, { cmd, model, timeoutMs, prompt = PROMPT }) {
   const cwd = path.join(dataDir(), "reviewer-cwd");
   fs.mkdirSync(cwd, { recursive: true, mode: 0o700 });
   const args = ["-p", "--model", model, "--tools", "", "--setting-sources", "", "--strict-mcp-config",
-    "--no-session-persistence", "--output-format", "json", "--system-prompt", PROMPT];
+    "--no-session-persistence", "--output-format", "json", "--system-prompt", prompt];
   const p = spawnSync(cmd, args, { input, cwd, encoding: "utf8", timeout: timeoutMs, maxBuffer: 4 * 1024 * 1024 });
   if (p.error || p.status !== 0) throw new Error("the reviewer did not run");
   const out = JSON.parse(p.stdout);
@@ -87,9 +98,16 @@ function acquire(lock, waitMs) {
   }
 }
 
+// The rule and, for a vague error, the names on its `WHEN:` line.
+function parseAnswer(answer, vague) {
+  const m = vague && /^([^\n]+)\n\s*WHEN:\s*([^\n]+)$/i.exec(answer);
+  return m ? { rule: m[1], names: m[2].split(",") } : { rule: answer };
+}
+
 // Returns what happened: "saved", "none" (the reviewer saw no clear rule),
 // "rejected" (its answer is not a valid lesson), "error", or why it did not
-// run: "invalid", "off", "busy", "exists", "retired", "cap", "gave-up".
+// run: "invalid", "off", "busy", "exists", "retired", "cap", "gave-up". For a
+// vague error, "exists" and "retired" are known only after the answer.
 export function learn(payload, { run = runModel, waitMs = 90000 } = {}) {
   const cls = payload?.class;
   if (typeof cls !== "string" || !cls) return "invalid";
@@ -105,24 +123,33 @@ export function learn(payload, { run = runModel, waitMs = 90000 } = {}) {
     return "busy";
   }
   try {
-    if (readLessons().has(cls)) return "exists";
-    if (readRetired().has(cls)) return "retired";
+    const vague = namesNothing(cls);
+    if (!vague && readLessons().has(cls)) return "exists";
+    if (!vague && readRetired().has(cls)) return "retired";
     const attempts = readLog().filter((a) => a?.status !== "busy");
     const today = new Date().toDateString(); // the local day
     if (attempts.filter((a) => new Date(a?.ts).toDateString() === today).length >= config.dailyCap) return "cap";
     // Only answers count against a class; an outage or a missing CLI does not.
-    const failed = attempts.filter((a) => a?.class === cls && (a.status === "none" || a.status === "rejected"));
+    const failed = attempts.filter((a) => a?.class === cls && (vague
+      ? NO_LESSON.includes(a.status) && Date.now() - Date.parse(a.ts) < VAGUE_RETRY_MS
+      : a.status === "none" || a.status === "rejected"));
     if (failed.length >= MAX_FAILED_PER_CLASS) return "gave-up";
     const started = Date.now();
     let status = "error";
     try {
       const { class: _class, ...episode } = payload;
-      const answer = String(run(JSON.stringify(episode), config) ?? "").trim();
-      const lesson = validateLesson(answer);
+      const prompt = vague ? PROMPT + VAGUE_PROMPT : PROMPT;
+      const answer = String(run(JSON.stringify(episode), { ...config, prompt }) ?? "").trim();
+      const { rule, names } = parseAnswer(answer, vague);
+      const lesson = validateLesson(rule);
+      const when = vague && lesson ? validateWhen(names, lesson, payload.failing) : undefined;
+      const key = lessonKey(cls, when);
       if (isNone(answer)) status = "none";
-      else if (!lesson) status = "rejected";
+      else if (!lesson || (vague && !when)) status = "rejected";
+      else if (vague && readLessons().has(key)) status = "exists";
+      else if (vague && readRetired().has(key)) status = "retired";
       else {
-        appendLine(lessonsPath(), { v: 1, ts: new Date().toISOString(), class: cls, lesson, model: config.model });
+        appendLine(lessonsPath(), { v: 1, ts: new Date().toISOString(), class: cls, lesson, ...(when ? { when } : {}), model: config.model });
         status = "saved";
       }
     } catch {

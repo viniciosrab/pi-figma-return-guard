@@ -52,13 +52,43 @@ export function validateLesson(text) {
   return FORBIDDEN.some((pattern) => pattern.test(lesson)) ? undefined : lesson;
 }
 
-// Classes whose lessons the user retired: they are not learned again.
+// An error message that names no property, function or API ("cannot read
+// property of undefined") has many unrelated causes, so its class alone does
+// not say which mistake was made. A lesson for such an error is one known
+// cause, tied to `when`: one to three names the failing script must use.
+export const namesNothing = (cls) => /^[A-Za-z]*Error: [a-z][a-z ]*$/.test(String(cls ?? ""));
+
+const NAME = /^[A-Za-z_$][\w$]{1,39}$/;
+const uses = (text, name) => new RegExp(`(?<![\\w$])${name.replace(/\$/g, "\\$")}(?![\\w$])`).test(String(text ?? ""));
+
+// Keeps the names that the lesson itself mentions, so they add nothing from
+// the script to what is stored, and that `script` uses when it is given (the
+// reviewer often also lists the name of the fix, which the script lacks).
+export function validateWhen(names, lesson, script) {
+  if (!Array.isArray(names)) return undefined;
+  const when = [...new Set(names.map((n) => String(n).trim().replace(/^[.`]+/, "").replace(/[`()]+$/, "")))]
+    .filter((n) => NAME.test(n) && uses(lesson, n) && (script === undefined || uses(script, n)))
+    .sort();
+  return when.length >= 1 && when.length <= 3 ? when : undefined;
+}
+
+// What identifies a lesson: its error class, plus its names for a vague error.
+export const lessonKey = (cls, when) => (Array.isArray(when) && when.length ? `${cls} [${when.join(", ")}]` : cls);
+
+// The lessons for an error in a script: the one of its class or, for an error
+// that names nothing, those whose names the script uses, the latest first.
+export function lessonsFor(lessons, cls, script) {
+  if (!namesNothing(cls)) return lessons.has(cls) ? [lessons.get(cls)] : [];
+  return [...lessons.values()].filter((l) => l.class === cls && l.when?.every((n) => uses(script, n))).reverse();
+}
+
+// Keys of the lessons the user retired: they are not learned again.
 export function retiredClasses(text) {
   const retired = new Set();
   for (const line of String(text ?? "").split("\n")) {
     try {
       const entry = JSON.parse(line);
-      if (typeof entry?.class === "string" && entry.retired) retired.add(entry.class);
+      if (typeof entry?.class === "string" && entry.retired) retired.add(lessonKey(entry.class, entry.when));
     } catch {}
   }
   return retired;
@@ -72,8 +102,9 @@ export function readRetired() {
   }
 }
 
-// Error class -> its latest valid lesson. A line with `retired: true` removes
-// the class; corrupt and invalid lines are skipped.
+// Lesson key -> its latest valid lesson. A line with `retired: true` removes
+// the lesson; corrupt and invalid lines are skipped, and so is a lesson for a
+// vague error that has no valid names.
 export function parseLessons(text) {
   const lessons = new Map();
   for (const line of String(text ?? "").split("\n")) {
@@ -82,12 +113,12 @@ export function parseLessons(text) {
       const entry = JSON.parse(line);
       if (typeof entry?.class !== "string") continue;
       if (entry.retired) {
-        lessons.delete(entry.class);
+        lessons.delete(lessonKey(entry.class, entry.when));
         continue;
       }
       // An approval names the exact lesson text it approves.
       if (typeof entry.approved === "string") {
-        const current = lessons.get(entry.class);
+        const current = lessons.get(lessonKey(entry.class, entry.when));
         if (current && current.lesson === validateLesson(entry.approved)) {
           current.approved = true;
           current.approvedAt = entry.ts;
@@ -95,7 +126,11 @@ export function parseLessons(text) {
         continue;
       }
       const lesson = validateLesson(entry.lesson);
-      if (lesson) lessons.set(entry.class, { ...entry, lesson, approved: false });
+      if (!lesson) continue;
+      const when = namesNothing(entry.class) ? validateWhen(entry.when, lesson) : undefined;
+      if (namesNothing(entry.class) && !when) continue;
+      const key = lessonKey(entry.class, when);
+      lessons.set(key, { ...entry, key, lesson, when, approved: false });
     } catch {}
   }
   return lessons;
@@ -116,7 +151,7 @@ export const numbered = () => [...readLessons().values()];
 function mark(n, entry) {
   const lesson = numbered()[Number(n) - 1];
   if (!lesson) return "missing";
-  appendLine(lessonsPath(), { v: 1, ts: new Date().toISOString(), class: lesson.class, ...entry(lesson) });
+  appendLine(lessonsPath(), { v: 1, ts: new Date().toISOString(), class: lesson.class, ...(lesson.when ? { when: lesson.when } : {}), ...entry(lesson) });
   return "ok";
 }
 export const approveLesson = (n) => (mark(n, (l) => ({ approved: l.lesson })) === "ok" ? "approved" : "missing");
@@ -157,23 +192,28 @@ export function standing(entries, lessons) {
   const counts = new Map();
   const add = (map, key, value) => (map.get(key) ?? map.set(key, new Set()).get(key)).add(value);
   for (const e of entries ?? []) {
-    if (e?.kind !== "result" || e.ok || !lessons.has(e.class)) continue;
-    const lesson = lessons.get(e.class);
-    const at = Date.parse(e.ts ?? "");
-    // Only errors after the lesson was saved say whether it helps.
-    const savedAt = Date.parse(lesson.ts ?? "");
-    if (savedAt && at < savedAt) continue;
-    add(sessions, e.class, e.session);
-    const approvedAt = Date.parse(lesson.approvedAt ?? "");
-    if (approvedAt && at > approvedAt) add(afterApproval, e.class, e.session);
-    counts.set(e.class, (counts.get(e.class) ?? 0) + 1);
+    if (e?.kind !== "result" || e.ok) continue;
+    // A vague error counts toward the lessons that were shown for it.
+    for (const key of Array.isArray(e.lessons) ? e.lessons : [e.class]) {
+      const lesson = lessons.get(key);
+      if (!lesson) continue;
+      const at = Date.parse(e.ts ?? "");
+      // Only errors after the lesson was saved say whether it helps.
+      const savedAt = Date.parse(lesson.ts ?? "");
+      if (savedAt && at < savedAt) continue;
+      add(sessions, key, e.session);
+      const approvedAt = Date.parse(lesson.approvedAt ?? "");
+      if (approvedAt && at > approvedAt) add(afterApproval, key, e.session);
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+    }
   }
-  return [...lessons.values()]
-    .map((l, i) => {
-      const n = sessions.get(l.class)?.size ?? 0;
-      const since = l.approvedAt ? (afterApproval.get(l.class)?.size ?? 0) : Math.max(0, n - PROMOTE_AT);
+  // `class` is the lesson's key: the error class, with the names for a vague one.
+  return [...lessons.entries()]
+    .map(([key, l], i) => {
+      const n = sessions.get(key)?.size ?? 0;
+      const since = l.approvedAt ? (afterApproval.get(key)?.size ?? 0) : Math.max(0, n - PROMOTE_AT);
       const status = n < PROMOTE_AT ? "learned" : !l.approved ? "waiting" : since < DROP_AFTER ? "hint" : "dropped";
-      return { number: i + 1, class: l.class, lesson: l.lesson, sessions: n, count: counts.get(l.class) ?? 0, status };
+      return { number: i + 1, class: key, lesson: l.lesson, sessions: n, count: counts.get(key) ?? 0, status };
     })
     .sort((a, b) => b.sessions - a.sessions || b.count - a.count);
 }

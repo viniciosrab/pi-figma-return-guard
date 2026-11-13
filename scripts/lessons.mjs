@@ -24,7 +24,7 @@ if (action === "approve" || action === "retire") {
   const list = lessons.numbered();
   if (!list.length) console.log("No lessons learned yet.");
   list.forEach((l, i) => {
-    const s = standing.get(l.class);
-    console.log(`${i + 1}. ${l.class}\n   ${s?.status ?? "learned"}${l.approved ? ", approved" : ""} - ${s?.sessions ?? 0} sessions since learned\n   ${l.lesson}`);
+    const s = standing.get(l.key);
+    console.log(`${i + 1}. ${l.key}\n   ${s?.status ?? "learned"}${l.approved ? ", approved" : ""} - ${s?.sessions ?? 0} sessions since learned\n   ${l.lesson}`);
   });
 }
