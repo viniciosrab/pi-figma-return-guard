@@ -22,10 +22,13 @@ To make the first try right, the extension also tells the agent up front, once p
 
 The same hint also tells the agent to filter layer lookups by type and to look nodes up again after `remove()` or `detachInstance()`.
 
-Before a script reaches Figma, the extension blocks two kinds of scripts that cannot work:
+Before a script reaches Figma, the extension silently fixes mistakes that have a fix with the same meaning, so the agent never sees an error for them:
 
-- calls the use_figma runtime rejects (`loadAllPagesAsync`, `setFileThumbnailNodeAsync`, `setPluginData`, `getPluginData`, `setRangeOpenTypeFeatures`), naming what to use instead;
-- scripts that do not parse, such as a `const` declared twice after joining helper snippets, naming the problem and the line.
+- a name declared twice, usually after joining stored helper code with new code: everything from the second declaration to the end goes into a `{ }` block, so the helpers keep their binding and the new code sees the new one;
+- `figma.loadAllPagesAsync()`, which the use_figma runtime rejects, becomes a loop that loads each page;
+- `setPluginData` and `getPluginData`, which the runtime rejects, become `setSharedPluginData` and `getSharedPluginData` in one fixed namespace (`piagent`).
+
+It blocks only scripts that cannot work and have no such fix: `setFileThumbnailNodeAsync`, `setRangeOpenTypeFeatures`, and scripts that still do not parse, naming the problem and the line.
 
 When a script fails in Figma, the extension adds to the error text:
 

@@ -5,8 +5,9 @@
 // does not count toward the limit, so the guard points the agent there.
 // It also tells the agent this up front, once per session, in a hidden
 // message, whenever a Figma MCP server is configured.
-// It also stops scripts that cannot work (unsupported APIs, syntax errors)
-// before they reach Figma, and adds the likely cause and fix to failed results.
+// It also fixes, before sending, script mistakes that have a fix with the same
+// meaning, blocks scripts that cannot work, and adds the likely cause and fix
+// to failed results.
 // Tests: npm test
 // @ts-nocheck
 
@@ -64,29 +65,63 @@ export function configuredServerNames(cwd, home = os.homedir()) {
   return names;
 }
 
-// APIs the use_figma runtime rejects (each reproduced), with what to do instead.
+// APIs the use_figma runtime rejects (each reproduced) that have no
+// replacement doing the same thing, with what to do instead.
 const UNSUPPORTED = {
-  loadAllPagesAsync: "Load a page with `await page.loadAsync()`, or switch to it with `await figma.setCurrentPageAsync(page)`.",
   setFileThumbnailNodeAsync: "The file thumbnail cannot be set from a script; ask the user to set it in Figma.",
-  setPluginData: "Use `setSharedPluginData(namespace, key, value)` instead.",
-  getPluginData: "Use `getSharedPluginData(namespace, key)` instead.",
   setRangeOpenTypeFeatures: "OpenType features cannot be set from a script; leave them out or ask the user.",
 };
 const UNSUPPORTED_CALL = new RegExp(`\\.\\s*(${Object.keys(UNSUPPORTED).join("|")})\\s*\\(`);
 
-// The script's first syntax error, with its line, or undefined when it parses.
+// Rejected APIs that have an equivalent, replaced before the script is sent.
+// Private plugin data is unavailable in this runtime, so every value the agent
+// reads was written through the same replacement, in the same namespace.
+const NAMESPACE = "piagent";
+const REPLACEMENTS = [
+  [/\bfigma\.loadAllPagesAsync\(\s*\)/g, "(async () => { for (const __page of figma.root.children) await __page.loadAsync(); })()"],
+  [/\.setPluginData\(/g, `.setSharedPluginData('${NAMESPACE}', `],
+  [/\.getPluginData\(/g, `.getSharedPluginData('${NAMESPACE}', `],
+];
+
+// The script's first syntax error and its line, or undefined when it parses.
 // It is only compiled, never run.
-export function syntaxError(code) {
+function parseError(code) {
   try {
     new vm.Script(`(async () => {\n${code}\n})`, { filename: "figma-script" });
     return undefined;
   } catch (error) {
     if (error?.name !== "SyntaxError") return undefined;
     const line = /figma-script:(\d+)/.exec(String(error.stack))?.[1];
-    return `${error.message}${line ? ` (line ${Number(line) - 1})` : ""}`;
+    return { message: String(error.message), line: line ? Number(line) - 1 : undefined };
   }
 }
 
+export function syntaxError(code) {
+  const error = parseError(code);
+  return error && `${error.message}${error.line ? ` (line ${error.line})` : ""}`;
+}
+
+// A name declared twice, usually after joining stored helper code with new
+// code. Wrapping everything from the second declaration to the end in a block
+// keeps what the agent meant: code before it, helpers included, keeps the first
+// binding, and code after it sees the new one.
+const REDECLARED = /declare a (const|let) variable twice|has already been declared|redefinition of lexical/i;
+
+export function fixRedeclarations(code) {
+  let fixed = code;
+  for (let i = 0; i < 10; i++) {
+    const error = parseError(fixed);
+    if (!error) return fixed;
+    const lines = fixed.split("\n");
+    if (!REDECLARED.test(error.message) || !error.line || error.line > lines.length) return code;
+    lines.splice(error.line - 1, 0, "{");
+    fixed = `${lines.join("\n")}\n}`;
+  }
+  return parseError(fixed) ? code : fixed;
+}
+
+// Blocks what cannot work, and silently fixes what can be fixed without
+// changing what the script does, so the agent never sees those errors.
 export function check(toolName, input) {
   if (!FIGMA_TOOL.test(String(toolName ?? ""))) return undefined;
   if (typeof input?.code !== "string") return undefined;
@@ -98,6 +133,10 @@ export function check(toolName, input) {
       reason: `Blocked: \`${api}\` is not supported in use_figma scripts; Figma rejects it and discards the run's canvas edits. ${UNSUPPORTED[api]}`,
     };
   }
+  let code = input.code;
+  for (const [pattern, replacement] of REPLACEMENTS) code = code.replace(pattern, replacement);
+  code = fixRedeclarations(code);
+  if (code !== input.code) input.code = code;
   const syntax = syntaxError(input.code);
   if (syntax) {
     return {

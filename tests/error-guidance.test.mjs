@@ -84,22 +84,62 @@ check("leaves timeouts alone (the run may still finish)", result("MCP request ti
 check("does not add the guidance twice", result("TypeError: x\n\n" + mod.ROLLBACK_NOTE) === undefined);
 check("tolerates a missing event", handlers.tool_result?.(undefined, {}) === undefined);
 
-// Checks before sending.
-const call = (code, toolName = "mcp__figma__use_figma") => handlers.tool_call?.({ toolName, input: { code } });
-for (const api of ["loadAllPagesAsync", "setFileThumbnailNodeAsync", "setPluginData", "getPluginData", "setRangeOpenTypeFeatures"]) {
-  const r = call(`const n = figma.currentPage;\nawait n.${api}(0, 1);\nreturn 'ok';`);
+// Before sending: fix what can be fixed without changing what the script does,
+// block only what cannot work.
+const call = (code, toolName = "mcp__figma__use_figma") => {
+  const input = { code };
+  const r = handlers.tool_call?.({ toolName, input });
+  return { r, code: input.code };
+};
+const AsyncFunction = (async () => {}).constructor;
+const run = (code, figma) => new AsyncFunction("figma", code)(figma);
+
+for (const api of ["setFileThumbnailNodeAsync", "setRangeOpenTypeFeatures"]) {
+  const { r } = call(`const n = figma.currentPage;\nawait n.${api}(0, 1);\nreturn 'ok';`);
   check(`blocks unsupported ${api}`, r?.block === true && r.reason.startsWith("Blocked:") && r.reason.includes(api) && r.reason.includes("not supported"));
 }
-for (const ok of ["getSharedPluginData", "setSharedPluginData", "createImageAsync", "createAutoLayout", "getPluginDataKeys"]) {
-  check(`allows ${ok}`, call(`return figma.root.${ok}('a', 'b');`) === undefined);
+for (const ok of ["getSharedPluginData", "setSharedPluginData", "createImageAsync", "createAutoLayout"]) {
+  const src = `return figma.root.${ok}('a', 'b');`;
+  const { r, code } = call(src);
+  check(`allows ${ok} unchanged`, r === undefined && code === src);
 }
-const syn = call("const cols = 1;\nconst cols = 2;\nreturn cols;");
-check("blocks a script that does not parse, naming the problem and the line",
-  syn?.block === true && syn.reason.startsWith("Blocked:") && /cols/.test(syn.reason) && /line 2\b/.test(syn.reason));
-check("allows top-level await and return", call("const n = await figma.getNodeByIdAsync('1:2');\nreturn n ? n.id : null;") === undefined);
-check("allows modern syntax", call("const { a = 1, ...rest } = { b: 2 };\nconst v = rest?.b ?? a;\nfor await (const x of [Promise.resolve(v)]) {}\nreturn `${v}`;") === undefined);
-check("syntax check ignores non-Figma tools", call("const a = ;", "bash") === undefined);
-check("base64 block still comes first", call("return figma.base64Encode(x)")?.reason === mod.REASON);
+
+// Duplicate declarations from joined helper snippets: fixed, same behavior.
+const helpers = "const row = (name) => 'helper:' + name;\nconst card = () => row('x');\n";
+const snippet = "const row = 5;\nreturn card() + '|' + row;";
+const dup = call(helpers + snippet);
+check("fixes a duplicate const instead of blocking", dup.r === undefined && mod.syntaxError(dup.code) === undefined);
+check("the fix keeps the meaning: helpers use theirs, later code the new one", await run(dup.code, {}) === "helper:x|5");
+const one = call("const a = 1; const b = () => a;\nconst a = 2; return b() + a;");
+check("fixes a duplicate on a line with other statements", one.r === undefined && await run(one.code, {}) === 3);
+const two = call("const a = 1;\nlet b = 2;\nconst a = 3;\nlet b = 4;\nreturn a + b;");
+check("fixes several duplicates", two.r === undefined && await run(two.code, {}) === 7);
+const broken = call("const a = 1;\nconst b = ;\nreturn a;");
+check("still blocks a script that cannot be fixed, naming the line",
+  broken.r?.block === true && broken.r.reason.startsWith("Blocked:") && /line 2\b/.test(broken.r.reason));
+
+// loadAllPagesAsync: replaced by loading each page.
+const loaded = [];
+const fakeFigma = { root: { children: [1, 2, 3].map((id) => ({ loadAsync: async () => { loaded.push(id); } })) } };
+const pages = call("await figma.loadAllPagesAsync();\nreturn 'ok';");
+check("replaces loadAllPagesAsync instead of blocking", pages.r === undefined && !pages.code.includes("loadAllPagesAsync"));
+check("the replacement loads every page", await run(pages.code, fakeFigma) === "ok" && loaded.join() === "1,2,3");
+
+// Private plugin data: replaced by shared plugin data in one fixed namespace.
+const data = call("node.setPluginData('k', 'v');\nreturn node.getPluginData('k');");
+check("replaces setPluginData/getPluginData with the shared versions",
+  data.r === undefined && data.code === "node.setSharedPluginData('piagent', 'k', 'v');\nreturn node.getSharedPluginData('piagent', 'k');");
+const store = {};
+const node = { setSharedPluginData: (ns, k, v) => { store[ns + k] = v; }, getSharedPluginData: (ns, k) => store[ns + k] };
+check("the replacement round-trips", await new AsyncFunction("node", data.code)(node) === "v");
+
+const untouched = call("const a = ;", "bash");
+check("leaves non-Figma tools alone", untouched.r === undefined && untouched.code === "const a = ;");
+const awaitSrc = "const n = await figma.getNodeByIdAsync('1:2');\nreturn n ? n.id : null;";
+check("allows top-level await and return unchanged", call(awaitSrc).r === undefined && call(awaitSrc).code === awaitSrc);
+const modern = "const { a = 1, ...rest } = { b: 2 };\nconst v = rest?.b ?? a;\nfor await (const x of [Promise.resolve(v)]) {}\nreturn `${v}`;";
+check("allows modern syntax unchanged", call(modern).r === undefined && call(modern).code === modern);
+check("base64 block still comes first", call("return figma.base64Encode(x)").r?.reason === mod.REASON);
 
 console.log(failed ? `${failed} error-guidance checks failed` : "all error-guidance checks passed");
 process.exit(failed ? 1 : 0);
