@@ -85,7 +85,9 @@ export function summarize(entries) {
     list.forEach((e, i) => {
       if (e.ok) return;
       const key = e.class ?? "(no message)";
-      const c = classes.get(key) ?? { class: key, count: 0, sessions: new Set(), recovered: 0, extraCalls: 0, covered: true };
+      // Timeouts and argument validation errors are not script errors: they get
+      // no advice by design, so they are neither covered nor waiting for it.
+      const c = classes.get(key) ?? { class: key, count: 0, sessions: new Set(), recovered: 0, extraCalls: 0, covered: true, scriptError: e.scriptError !== false };
       c.count++;
       c.sessions.add(e.session);
       if (e.advice === "none") c.covered = false;
@@ -99,10 +101,13 @@ export function summarize(entries) {
   }
   const sorted = [...classes.values()]
     .map((c) => ({ ...c, sessions: c.sessions.size }))
-    .sort((x, y) => Number(x.covered) - Number(y.covered) || y.count - x.count);
+    .sort((x, y) => rank(x) - rank(y) || y.count - x.count);
   const errors = results.filter((e) => !e.ok).length;
   return { calls: results.length, errors, errorRate: results.length ? errors / results.length : 0, blocked, fixed, classes: sorted };
 }
+
+// Uncovered script errors first, then covered ones, then non-script errors.
+const rank = (c) => (!c.scriptError ? 2 : c.covered ? 1 : 0);
 
 export function formatReport(summary) {
   const pct = (summary.errorRate * 100).toFixed(1);
@@ -116,10 +121,12 @@ export function formatReport(summary) {
     `Fixed silently before sending: ${kinds(summary.fixed)}`,
   ];
   if (summary.corrupt) out.push(`Corrupt lines skipped: ${summary.corrupt}`);
-  const notCovered = summary.classes.filter((c) => !c.covered);
-  const covered = summary.classes.filter((c) => c.covered);
+  const notCovered = summary.classes.filter((c) => rank(c) === 0);
+  const covered = summary.classes.filter((c) => rank(c) === 1);
+  const notScript = summary.classes.filter((c) => rank(c) === 2);
   if (notCovered.length) out.push("", "Not covered yet (the agent got no specific advice):", header, ...notCovered.map(row));
   if (covered.length) out.push("", "Covered:", header, ...covered.map(row));
+  if (notScript.length) out.push("", "Not script errors (timeouts, invalid arguments; no advice needed):", header, ...notScript.map(row));
   if (summary.lessons?.length) {
     out.push("", `Lessons learned: ${summary.lessons.length}`, "  #   status    sessions  error");
     for (const l of summary.lessons) {

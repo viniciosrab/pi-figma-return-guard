@@ -132,6 +132,22 @@ check("not covered classes come first", s.classes[0].class === B && s.classes[0]
 const text = journal.formatReport({ ...s, corrupt: 2 });
 check("formatted report lists not-covered first and corrupt lines",
   text.indexOf("Not covered yet") >= 0 && text.indexOf("Not covered yet") < text.indexOf(A) && text.includes(B) && /corrupt lines skipped: 2/i.test(text));
+// Errors that are not script errors (timeouts, argument validation) got no
+// advice by design: they are neither covered nor waiting for coverage.
+const T = "MCP request timed out after <n>ms";
+const s2 = journal.summarize([
+  e("s1", false, A, "lookup"), e("s1", true),
+  e("s2", false, B, "none"), e("s2", true),
+  { v: 1, kind: "result", session: "s3", ok: false, class: T, advice: null, scriptError: false }, e("s3", true),
+]);
+const t = s2.classes.find((c) => c.class === T);
+check("non-script errors are neither covered nor uncovered", t?.scriptError === false && t.count === 1 && t.recovered === 1 && s2.classes.at(-1) === t);
+const text2 = journal.formatReport(s2);
+const at = (h) => text2.indexOf(h);
+check("report lists non-script errors in their own last section",
+  at("Not script errors") > at("Covered:") && at("Covered:") > at("Not covered yet") && at("Not covered yet") >= 0 &&
+  at(T) > at("Not script errors") && at(A) > at("Covered:") && at(A) < at("Not script errors") && at(B) < at("Covered:"));
+
 const parsed = journal.parseJournal('{"v":1,"kind":"result","session":"s","ok":true}\nnot json\n\n{"v":1,"kind":"result","session":"s","ok":false,"class":"x"}\n');
 check("parser skips corrupt lines and counts them", parsed.entries.length === 2 && parsed.corrupt === 1);
 

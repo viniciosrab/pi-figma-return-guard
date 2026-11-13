@@ -36,7 +36,7 @@ When a script fails in Figma, the extension adds to the error text:
 - the likely cause and fix for the errors seen in real sessions: a lookup that found nothing or a TEXT layer named like its FRAME, a node used after it was removed or detached, an unsupported API, a locked instance layer, an unquoted non-ASCII `query()` selector, a NaN value, a component property reference outside a component, and syntax errors;
 - a note that Figma discarded all of the run's canvas edits, so the agent reruns the fixed script instead of cleaning up.
 
-Argument validation errors, timeouts and blocked calls are left alone, because nothing ran in Figma.
+Argument validation errors, timeouts and blocked calls are left alone: a blocked or invalid call never ran in Figma, and a timed-out run may still finish there, so there is no script error to explain.
 
 ## Journal and report
 
@@ -46,7 +46,7 @@ The extension keeps a local journal of Figma script calls, so repeated errors ca
 - It never stores: the script code, the failing line's text, the full error text or anything else from the design.
 - It only appends, so several Pi sessions can write at once. Past 5 MB it moves the file to `journal.1.jsonl`. If writing fails, the tool call goes on unchanged.
 
-`npm run report` prints the total of calls, the error rate, blocks and fixes, and each error class with how many times it happened, in how many sessions, how often the agent recovered and how many extra calls that took. Classes the extension has no advice for are listed first, under "Not covered yet".
+`npm run report` prints the total of calls, the error rate, blocks and fixes, and each error class with how many times it happened, in how many sessions, how often the agent recovered and how many extra calls that took. Classes the extension has no advice for are listed first, under "Not covered yet". Timeouts and argument validation errors are listed last, under "Not script errors", because they need no advice.
 
 ## Learning from new errors
 
