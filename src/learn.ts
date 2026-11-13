@@ -7,7 +7,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
-import { appendLine, dataDir, learningOn, lessonsPath, readLessons, readRetired, validateLesson } from "./lessons.ts";
+import { appendLine, dataDir, isNone, learningOn, lessonsPath, readLessons, readRetired, validateLesson } from "./lessons.ts";
 
 export const PROMPT = [
   "You review one failed Figma plugin script, run through the Figma MCP `use_figma` tool, and how the agent got past the failure. Write the general rule that would have prevented the error, for future agents writing such scripts.",
@@ -119,7 +119,7 @@ export function learn(payload, { run = runModel, waitMs = 90000 } = {}) {
       const { class: _class, ...episode } = payload;
       const answer = String(run(JSON.stringify(episode), config) ?? "").trim();
       const lesson = validateLesson(answer);
-      if (/^none\s*([.,:;!-]|$)/i.test(answer)) status = "none";
+      if (isNone(answer)) status = "none";
       else if (!lesson) status = "rejected";
       else {
         appendLine(lessonsPath(), { v: 1, ts: new Date().toISOString(), class: cls, lesson, model: config.model });

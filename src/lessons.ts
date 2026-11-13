@@ -16,10 +16,12 @@ const LESSON_MIN = 30;
 export const LESSON_MAX = 400;
 
 // A lesson is one plain sentence about Figma scripts. The reviewer writes it
-// from an error and a script that may quote a design, so the check is strict:
-// plain ASCII only (no look-alike letters, hidden or line-breaking characters),
-// and nothing that points elsewhere or reads like an order about something
-// other than Figma scripts. A refused lesson only means one less hint.
+// from an error and a script that may quote a design, so its form is checked:
+// plain ASCII (no look-alike letters, hidden or line-breaking characters), no
+// links, tags, entities, code fences or node IDs, and none of a few phrases no
+// Figma rule needs. A keyword check cannot catch every rewording, so it is not
+// the defense: lessons always reach the agent labeled as tips, and a lesson
+// joins the session-start hint only after the user approves it.
 const TYPOGRAPHIC = [
   [/[\u2018\u2019\u201a\u201b]/g, "'"],
   [/[\u201c\u201d\u201e\u201f]/g, '"'],
@@ -29,22 +31,23 @@ const TYPOGRAPHIC = [
 ];
 const PLAIN = /^[\x20-\x7e]+$/;
 const FORBIDDEN = [
-  // links
-  /:\/\/|\bwww\.|\]\(|\b[a-z0-9-]+(\.[a-z0-9-]+)+\/|\b[a-z0-9-]+\.(com|net|org|io|dev|app|xyz|ru|cn|co|me|info|sh|ly)\b/i,
-  /```|<\s*[\/!a-z]|&#?\w+;/i, // code fences, tags, entities
-  /\blocalhost\b|\b\d{1,3}(\.\d{1,3}){3}\b|~\/|\.\.\/|[A-Za-z0-9+\/]{32,}={0,2}/, // hosts, IPs, paths, base64
+  /:\/\/|\bwww\.|\]\(/i, // links
+  /```|<[\/!a-z]|<\s+[\/!]?[a-z][\w-]*\s*>|&#?\w+;/i, // code fences, tags, entities
   /\bI?\d+\s*[:;]\s*\d+\b/, // node IDs: a lesson is general
-  /\b(curl|wget|sudo|ssh|bash|zsh|sh|fish|shell|terminal|npm|npx|pip|rm|chmod|eval|exec|passwords?|credentials?|secrets?|(access|auth|bearer|api|refresh|session) tokens?|cookies?|passphrases?|private keys?|api[ _-]?keys?|keychain)\b|\.env\b|\s-c\b/i,
-  /\b(delete|remove|erase|wipe|overwrite)\b.{0,40}\b(files?|folders?|director(y|ies)|projects?|repositor(y|ies)|disk|home)\b/i,
+  /\b(curl|wget|sudo|ssh|passwords?|credentials?|secrets?|(access|auth|bearer|api|refresh) tokens?|cookies?|passphrases?|private keys?|api[ _-]?keys?|keychain)\b|\.env\b/i,
   /\b(system prompt|instructions?|disregard|forget|ignore|you must now|from now on|new rule|rules? above)\b|\bas (the|an|your) (assistant|ai|agent|model)\b|\bthe user (says|said|wants|asked|requires)\b|\btold (you )?before\b/i,
   /\bpay no attention\b|\byour (real|actual|true) (task|job|goal)\b|\breply only\b|\brespond only\b|\bdeveloper mode\b|^\s*\[\s*system\s*\]|^\s*system\s*:/i,
-  /^none\s*([.,:;!-]|$)/i,
 ];
 
+const plainText = (text) => TYPOGRAPHIC.reduce((t, [pattern, plain]) => t.replace(pattern, plain), String(text).trim());
+
+// The reviewer's way of saying it found no clear rule: "NONE", alone or
+// followed by punctuation. "None of ..." is a lesson.
+export const isNone = (text) => typeof text === "string" && /^none\s*([.,:;!-]|$)/i.test(plainText(text));
+
 export function validateLesson(text) {
-  if (typeof text !== "string") return undefined;
-  let lesson = text.trim();
-  for (const [pattern, plain] of TYPOGRAPHIC) lesson = lesson.replace(pattern, plain);
+  if (typeof text !== "string" || isNone(text)) return undefined;
+  const lesson = plainText(text);
   if (lesson.length < LESSON_MIN || lesson.length > LESSON_MAX || !PLAIN.test(lesson)) return undefined;
   return FORBIDDEN.some((pattern) => pattern.test(lesson)) ? undefined : lesson;
 }
@@ -82,8 +85,17 @@ export function parseLessons(text) {
         lessons.delete(entry.class);
         continue;
       }
+      // An approval names the exact lesson text it approves.
+      if (typeof entry.approved === "string") {
+        const current = lessons.get(entry.class);
+        if (current && current.lesson === validateLesson(entry.approved)) {
+          current.approved = true;
+          current.approvedAt = entry.ts;
+        }
+        continue;
+      }
       const lesson = validateLesson(entry.lesson);
-      if (lesson) lessons.set(entry.class, { ...entry, lesson });
+      if (lesson) lessons.set(entry.class, { ...entry, lesson, approved: false });
     } catch {}
   }
   return lessons;
@@ -96,6 +108,19 @@ export function readLessons() {
     return new Map();
   }
 }
+
+// The lessons in the order `npm run lessons` numbers them.
+export const numbered = () => [...readLessons().values()];
+
+// Approves or retires lesson number `n` (1-based). Returns what happened.
+function mark(n, entry) {
+  const lesson = numbered()[Number(n) - 1];
+  if (!lesson) return "missing";
+  appendLine(lessonsPath(), { v: 1, ts: new Date().toISOString(), class: lesson.class, ...entry(lesson) });
+  return "ok";
+}
+export const approveLesson = (n) => (mark(n, (l) => ({ approved: l.lesson })) === "ok" ? "approved" : "missing");
+export const retireLesson = (n) => (mark(n, () => ({ retired: true })) === "ok" ? "retired" : "missing");
 
 export function appendLine(file, entry) {
   fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
@@ -113,34 +138,42 @@ export function learningOn() {
   }
 }
 
-// A lesson joins the session-start hint once its error has happened in this
-// many sessions, and leaves it when the error happens in this many more: the
-// line is then not preventing it. The volumes are too small for statistics.
+// A lesson can join the session-start hint once its error has happened in
+// this many sessions and the user approved it, and leaves it when the error
+// happens in this many more sessions after the approval: the line is then not
+// preventing it. The volumes are too small for statistics.
 export const PROMOTE_AT = 3;
 export const DROP_AFTER = 3;
 const HINT_MAX_LESSONS = 8;
 const HINT_MAX_CHARS = 1200;
 
-// Each lesson with how often its error happened and where it stands:
-// "learned" (shown when the error happens), "hint" (also told up front) or
+// Each lesson with its number, how often its error happened and where it
+// stands: "learned" (shown when the error happens), "waiting" (repeats enough
+// for the hint, waits for the user's approval), "hint" (also told up front) or
 // "dropped" (was told up front and did not prevent the error).
 export function standing(entries, lessons) {
   const sessions = new Map();
+  const afterApproval = new Map();
   const counts = new Map();
+  const add = (map, key, value) => (map.get(key) ?? map.set(key, new Set()).get(key)).add(value);
   for (const e of entries ?? []) {
     if (e?.kind !== "result" || e.ok || !lessons.has(e.class)) continue;
+    const lesson = lessons.get(e.class);
+    const at = Date.parse(e.ts ?? "");
     // Only errors after the lesson was saved say whether it helps.
-    const savedAt = Date.parse(lessons.get(e.class).ts ?? "");
-    if (savedAt && Date.parse(e.ts ?? "") < savedAt) continue;
-    if (!sessions.has(e.class)) sessions.set(e.class, new Set());
-    sessions.get(e.class).add(e.session);
+    const savedAt = Date.parse(lesson.ts ?? "");
+    if (savedAt && at < savedAt) continue;
+    add(sessions, e.class, e.session);
+    const approvedAt = Date.parse(lesson.approvedAt ?? "");
+    if (approvedAt && at > approvedAt) add(afterApproval, e.class, e.session);
     counts.set(e.class, (counts.get(e.class) ?? 0) + 1);
   }
   return [...lessons.values()]
-    .map((l) => {
+    .map((l, i) => {
       const n = sessions.get(l.class)?.size ?? 0;
-      const status = n < PROMOTE_AT ? "learned" : n < PROMOTE_AT + DROP_AFTER ? "hint" : "dropped";
-      return { class: l.class, lesson: l.lesson, sessions: n, count: counts.get(l.class) ?? 0, status };
+      const since = l.approvedAt ? (afterApproval.get(l.class)?.size ?? 0) : Math.max(0, n - PROMOTE_AT);
+      const status = n < PROMOTE_AT ? "learned" : !l.approved ? "waiting" : since < DROP_AFTER ? "hint" : "dropped";
+      return { number: i + 1, class: l.class, lesson: l.lesson, sessions: n, count: counts.get(l.class) ?? 0, status };
     })
     .sort((a, b) => b.sessions - a.sessions || b.count - a.count);
 }
