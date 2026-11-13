@@ -12,7 +12,8 @@
   "license": "MIT",
   "type": "module",
   "scripts": {
-    "test": "node --experimental-strip-types --no-warnings tests/figma-return-guard.test.mjs && node --experimental-strip-types --no-warnings tests/prompt-hint.test.mjs && node --experimental-strip-types --no-warnings tests/error-guidance.test.mjs"
+    "test": "node --experimental-strip-types --no-warnings tests/figma-return-guard.test.mjs && node --experimental-strip-types --no-warnings tests/prompt-hint.test.mjs && node --experimental-strip-types --no-warnings tests/error-guidance.test.mjs && node --experimental-strip-types --no-warnings tests/journal.test.mjs",
+    "report": "node --experimental-strip-types --no-warnings scripts/report.mjs"
   },
   "pi": {
     "extensions": [

@@ -1,6 +1,14 @@
 // Tests for src/index.ts. Run:
 //   npm test
 import { fileURLToPath } from "node:url";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+
+// Keep the journal away from the real ~/.pi/agent.
+const journalDir = fs.mkdtempSync(path.join(os.tmpdir(), "figma-guard-block-"));
+process.env.PI_CODING_AGENT_DIR = journalDir;
+process.on("exit", () => fs.rmSync(journalDir, { recursive: true, force: true }));
 
 const guardPath = fileURLToPath(new URL("../src/index.ts", import.meta.url));
 const mod = await import(guardPath);

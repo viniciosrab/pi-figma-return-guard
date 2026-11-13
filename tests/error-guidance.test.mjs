@@ -4,7 +4,14 @@
 // Run: npm test
 import { fileURLToPath } from "node:url";
 
-process.env.PI_CODING_AGENT_DIR = "/nonexistent-figma-guard-test";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+
+// Keep the journal away from the real ~/.pi/agent.
+const journalDir = fs.mkdtempSync(path.join(os.tmpdir(), "figma-guard-advice-"));
+process.env.PI_CODING_AGENT_DIR = journalDir;
+process.on("exit", () => fs.rmSync(journalDir, { recursive: true, force: true }));
 const mod = await import(fileURLToPath(new URL("../src/index.ts", import.meta.url)));
 
 const handlers = {};

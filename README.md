@@ -38,6 +38,16 @@ When a script fails in Figma, the extension adds to the error text:
 
 Argument validation errors, timeouts and blocked calls are left alone, because nothing ran in Figma.
 
+## Journal and report
+
+The extension keeps a local journal of Figma script calls, so repeated errors can be found without anyone relaying screenshots. It appends one JSON line per script result, block or silent fix to `~/.pi/agent/figma-return-guard/journal.jsonl` (or under `PI_CODING_AGENT_DIR`), readable only by you.
+
+- It stores: time, a random id per session, the tool name, whether the call worked, the error class with IDs, numbers and quoted design text removed, the failing line number, which advice was given, and which blocks or fixes were applied.
+- It never stores: the script code, the failing line's text, the full error text or anything else from the design.
+- It only appends, so several Pi sessions can write at once. Past 5 MB it moves the file to `journal.1.jsonl`. If writing fails, the tool call goes on unchanged.
+
+`npm run report` prints the total of calls, the error rate, blocks and fixes, and each error class with how many times it happened, in how many sessions, how often the agent recovered and how many extra calls that took. Classes the extension has no advice for are listed first, under "Not covered yet".
+
 ## What it checks
 
 - **Tools:** any tool of an MCP server whose name contains `figma` (`mcp__figma__*`, `mcp__figma_linux_next__*`, hash-suffixed names) and that receives a `code` string. Tools without `code`, such as `get_screenshot`, always pass.

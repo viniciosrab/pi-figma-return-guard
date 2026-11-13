@@ -15,6 +15,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import vm from "node:vm";
+import crypto from "node:crypto";
+import { normalizeError, record } from "./journal.ts";
 
 // Any tool of a Figma MCP server (figma, figma-linux-next, figma-desktop, hash
 // suffixes) that takes a `code` script; get_screenshot has no `code` and passes.
@@ -78,9 +80,9 @@ const UNSUPPORTED_CALL = new RegExp(`\\.\\s*(${Object.keys(UNSUPPORTED).join("|"
 // reads was written through the same replacement, in the same namespace.
 const NAMESPACE = "piagent";
 const REPLACEMENTS = [
-  [/\bfigma\.loadAllPagesAsync\(\s*\)/g, "(async () => { for (const __page of figma.root.children) await __page.loadAsync(); })()"],
-  [/\.setPluginData\(/g, `.setSharedPluginData('${NAMESPACE}', `],
-  [/\.getPluginData\(/g, `.getSharedPluginData('${NAMESPACE}', `],
+  [/\bfigma\.loadAllPagesAsync\(\s*\)/g, "(async () => { for (const __page of figma.root.children) await __page.loadAsync(); })()", "loadAllPagesAsync"],
+  [/\.setPluginData\(/g, `.setSharedPluginData('${NAMESPACE}', `, "pluginData"],
+  [/\.getPluginData\(/g, `.getSharedPluginData('${NAMESPACE}', `, "pluginData"],
 ];
 
 // The script's first syntax error and its line, or undefined when it parses.
@@ -122,31 +124,52 @@ export function fixRedeclarations(code) {
 
 // Blocks what cannot work, and silently fixes what can be fixed without
 // changing what the script does, so the agent never sees those errors.
-export function check(toolName, input) {
-  if (!FIGMA_TOOL.test(String(toolName ?? ""))) return undefined;
-  if (typeof input?.code !== "string") return undefined;
-  if (BASE64.test(input.code)) return { block: true, reason: REASON };
+// What the pre-send check did: the tool_call result, and for the journal the
+// kind of block and the silent fixes applied.
+function inspect(toolName, input) {
+  const none = { result: undefined, blocked: undefined, fixes: [] };
+  if (!FIGMA_TOOL.test(String(toolName ?? ""))) return none;
+  if (typeof input?.code !== "string") return none;
+  if (BASE64.test(input.code)) return { ...none, result: { block: true, reason: REASON }, blocked: "base64" };
   const api = UNSUPPORTED_CALL.exec(input.code)?.[1];
   if (api) {
     return {
-      block: true,
-      reason: `Blocked: \`${api}\` is not supported in use_figma scripts; Figma rejects it and discards the run's canvas edits. ${UNSUPPORTED[api]}`,
+      ...none,
+      blocked: `unsupported:${api}`,
+      result: {
+        block: true,
+        reason: `Blocked: \`${api}\` is not supported in use_figma scripts; Figma rejects it and discards the run's canvas edits. ${UNSUPPORTED[api]}`,
+      },
     };
   }
+  const fixes = new Set();
   let code = input.code;
-  for (const [pattern, replacement] of REPLACEMENTS) code = code.replace(pattern, replacement);
-  code = fixRedeclarations(code);
-  if (code !== input.code) input.code = code;
+  for (const [pattern, replacement, fix] of REPLACEMENTS) {
+    const next = code.replace(pattern, replacement);
+    if (next !== code) fixes.add(fix);
+    code = next;
+  }
+  const fixed = fixRedeclarations(code);
+  if (fixed !== code) fixes.add("redeclaration");
+  if (fixed !== input.code) input.code = fixed;
   const syntax = syntaxError(input.code);
   if (syntax) {
     return {
-      block: true,
-      reason:
-        `Blocked: this Figma script does not parse (SyntaxError: ${syntax}), so nothing was sent to Figma. ` +
-        "When joining helper snippets, wrap each block in `{ }` or rename duplicate `const` names.",
+      blocked: "syntax",
+      fixes: [...fixes],
+      result: {
+        block: true,
+        reason:
+          `Blocked: this Figma script does not parse (SyntaxError: ${syntax}), so nothing was sent to Figma. ` +
+          "When joining helper snippets, wrap each block in `{ }` or rename duplicate `const` names.",
+      },
     };
   }
-  return undefined;
+  return { ...none, fixes: [...fixes] };
+}
+
+export function check(toolName, input) {
+  return inspect(toolName, input).result;
 }
 
 // Added to failed Figma script results so the agent fixes the actual cause on
@@ -201,14 +224,14 @@ export const SYNTAX_GUIDANCE =
 
 // Most specific first.
 const ADVICE = [
-  [/The node with id "[^"]+" does not exist/, MISSING_NODE_GUIDANCE],
-  [/cannot be overridden in an instance|is an instance or is inside of an instance/, INSTANCE_GUIDANCE],
-  [/Invalid selector/, SELECTOR_GUIDANCE],
-  [/failed validation: Expected number, received nan/i, NAN_GUIDANCE],
-  [/Can only set component property references/, COMPONENT_REF_GUIDANCE],
-  [/is not a supported API|is not supported in this host runtime|\bfigma\.[\w.]+ is not a function|not implemented/, UNSUPPORTED_GUIDANCE],
-  [/^SyntaxError\b/m, SYNTAX_GUIDANCE],
-  [/no such property '[^']+' on [A-Z_]+ node|cannot (read|set) property '[^']+' of (undefined|null)/, LOOKUP_GUIDANCE],
+  [/The node with id "[^"]+" does not exist/, MISSING_NODE_GUIDANCE, "missing-node"],
+  [/cannot be overridden in an instance|is an instance or is inside of an instance/, INSTANCE_GUIDANCE, "instance"],
+  [/Invalid selector/, SELECTOR_GUIDANCE, "selector"],
+  [/failed validation: Expected number, received nan/i, NAN_GUIDANCE, "nan"],
+  [/Can only set component property references/, COMPONENT_REF_GUIDANCE, "component-ref"],
+  [/is not a supported API|is not supported in this host runtime|\bfigma\.[\w.]+ is not a function|not implemented/, UNSUPPORTED_GUIDANCE, "unsupported"],
+  [/^SyntaxError\b/m, SYNTAX_GUIDANCE, "syntax"],
+  [/no such property '[^']+' on [A-Z_]+ node|cannot (read|set) property '[^']+' of (undefined|null)/, LOOKUP_GUIDANCE, "lookup"],
 ];
 
 // Errors raised by a script that ran in Figma. Argument validation errors,
@@ -232,15 +255,45 @@ function failingLine(text, code) {
   return `${MARK} The error is on line ${n}: ${line}`;
 }
 
+const textOf = (content) => (Array.isArray(content) ? content.map((p) => (p?.type === "text" ? p.text : "")).join("\n") : "");
+const isScriptError = (text) => !text.includes(MARK) && !NOT_A_SCRIPT_ERROR.test(text) && SCRIPT_ERROR.test(text);
+
+// The script line number an error points at, when it is inside the script.
+function errorLine(text, code) {
+  const n = Number(/PLUGIN_\d+_SOURCE:(\d+):\d+/.exec(text)?.[1]);
+  return typeof code === "string" && n >= 1 && n <= code.split("\n").length ? n : null;
+}
+
 export function guidance(toolName, isError, content, code) {
   if (!isError || !FIGMA_TOOL.test(String(toolName ?? "")) || !Array.isArray(content)) return undefined;
-  const text = content.map((p) => (p?.type === "text" ? p.text : "")).join("\n");
-  if (text.includes(MARK) || NOT_A_SCRIPT_ERROR.test(text) || !SCRIPT_ERROR.test(text)) return undefined;
+  const text = textOf(content);
+  if (!isScriptError(text)) return undefined;
   const advice = ADVICE.find(([pattern]) => pattern.test(text))?.[1];
   const notes = [failingLine(text, code), advice, ROLLBACK_NOTE].filter(Boolean).join("\n\n");
   // Into the error's own text part, so scripts that read only that part see it.
   const at = content.findIndex((p) => p?.type === "text" && SCRIPT_ERROR.test(p.text));
   return { content: content.map((p, i) => (i === at ? { ...p, text: `${p.text}\n\n${notes}` } : p)) };
+}
+
+// One journal entry per Figma script result; never the code or the error text.
+function journalResult(event, session) {
+  const tool = event?.toolName;
+  const code = event?.input?.code;
+  if (!FIGMA_TOOL.test(String(tool ?? "")) || typeof code !== "string") return;
+  const text = textOf(event?.content);
+  if (/^Blocked:/.test(text.trim())) return; // already journaled by tool_call
+  const ok = !event?.isError;
+  const scriptError = !ok && isScriptError(text);
+  record({
+    kind: "result",
+    session,
+    tool,
+    ok,
+    class: ok ? null : normalizeError(text),
+    line: scriptError ? errorLine(text, code) : null,
+    advice: scriptError ? (ADVICE.find(([pattern]) => pattern.test(text))?.[2] ?? "none") : null,
+    scriptError,
+  });
 }
 
 export default function (pi) {
@@ -256,14 +309,30 @@ export default function (pi) {
   // provider receives it, including ones (such as claude-bridge) that rebuild
   // the system prompt and drop prompt changes made by extensions.
   let hinted = false;
+  let session = crypto.randomUUID?.() ?? String(Date.now());
   pi.on("session_start", () => {
     hinted = false;
+    try {
+      session = crypto.randomUUID();
+    } catch {}
   });
   pi.on("before_agent_start", (event, ctx) => {
     if (hinted || !wantsHint(event, figmaConfigured(ctx?.cwd ?? process.cwd()))) return undefined;
     hinted = true;
     return { message: { customType: "figma-return-guard", content: HINT, display: false } };
   });
-  pi.on("tool_call", (event) => check(event?.toolName, event?.input));
-  pi.on("tool_result", (event) => guidance(event?.toolName, event?.isError, event?.content, event?.input?.code));
+  pi.on("tool_call", (event) => {
+    const { result, blocked, fixes } = inspect(event?.toolName, event?.input);
+    const tool = event?.toolName;
+    if (blocked) record({ kind: "blocked", session, tool, reason: blocked });
+    if (fixes.length) record({ kind: "fixed", session, tool, fixes });
+    return result;
+  });
+  pi.on("tool_result", (event) => {
+    const result = guidance(event?.toolName, event?.isError, event?.content, event?.input?.code);
+    try {
+      journalResult(event, session);
+    } catch {}
+    return result;
+  });
 }
