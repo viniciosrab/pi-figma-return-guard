@@ -239,7 +239,8 @@ const ADVICE = [
 
 // Errors raised by a script that ran in Figma. Argument validation errors,
 // timeouts (the run may still finish) and blocked calls never ran there.
-const SCRIPT_ERROR = /PLUGIN_\d+_SOURCE|^(Type|Syntax|Reference|Range)Error\b|^Error: in \w+:/m;
+// Some runtime errors (a failed export) point at `<input>` instead.
+const SCRIPT_ERROR = /PLUGIN_\d+_SOURCE|\(<input>:\d+:\d+\)|^(Type|Syntax|Reference|Range)Error\b|^Error: in \w+:/m;
 const NOT_A_SCRIPT_ERROR = /^Blocked:|48000-byte limit|timed out|Validation failed for tool/m;
 
 // The script line an error points at, cut around the column when it is long.

@@ -80,6 +80,12 @@ const other = "Error: in set_fills: Expected array";
 check("unknown script error: keeps it and adds only the rollback note",
   keeps(result(other), other) && added(result(other), other).trim() === mod.ROLLBACK_NOTE);
 
+// Some runtime errors point at `<input>` instead of the plugin source; they
+// still ran in Figma, so they get the rollback note too.
+const exportErr = "Error: Failed to export node. This node may not have any visible layers.\n    at <anonymous> (<input>:1:22)\nFigma Debug UUID: x";
+check("an error at <input> is a script error: keeps it and adds the rollback note",
+  keeps(result(exportErr), exportErr) && added(result(exportErr), exportErr).includes(mod.ROLLBACK_NOTE) && !/line \d+:/.test(added(result(exportErr), exportErr)));
+
 // Left alone.
 const missing = 'Error: in appendChild: The node with id "1:2" does not exist';
 check("works for other Figma servers", added(result(missing, { toolName: "mcp__figma_linux_next__use_figma" }), missing).includes(mod.MISSING_NODE_GUIDANCE));
