@@ -36,7 +36,7 @@ const ERR = `${CLASS}\n    at <anonymous> (PLUGIN_1_SOURCE:1:5)`;
 check("accepts a plain rule, trimmed", lessons.validateLesson(`  ${GOOD}\n`) === GOOD);
 // The check is about form: one plain line, nothing that points elsewhere, no
 // hidden or look-alike characters, plus a few phrases no Figma rule needs. It
-// cannot catch every rewording; the label and the approval for the hint can.
+// cannot catch every rewording; the label as a tip and the repeat count can.
 for (const [name, bad] of [
   ["NONE", "NONE"],
   ["none with a period", "none."],
@@ -105,17 +105,11 @@ const parsed = lessons.parseLessons([
 check("reading: the latest lesson wins; retired, invalid and corrupt ones are left out",
   parsed.size === 1 && parsed.get("a").lesson === `${GOOD} Updated.`);
 
-const approvals = lessons.parseLessons([
+const oldApprovals = lessons.parseLessons([
   JSON.stringify({ class: "a", lesson: GOOD }),
   JSON.stringify({ class: "a", approved: GOOD }),
-  JSON.stringify({ class: "b", lesson: GOOD }),
-  JSON.stringify({ class: "b", approved: "another text that was never the lesson of b at all" }),
-  JSON.stringify({ class: "c", lesson: GOOD }),
-  JSON.stringify({ class: "c", approved: GOOD }),
-  JSON.stringify({ class: "c", lesson: `${GOOD} Relearned.` }),
 ].join("\n"));
-check("an approval binds to the exact lesson text, and a relearned lesson needs a new one",
-  approvals.get("a").approved === true && !approvals.get("b").approved && !approvals.get("c").approved);
+check("approval lines from older versions are ignored", oldApprovals.size === 1 && oldApprovals.get("a").lesson === GOOD);
 
 // --- The background reviewer -------------------------------------------------
 const payload = {
@@ -333,8 +327,9 @@ const known = new Map([["A", { class: "A", lesson: GOOD, approved: true }], ["B"
 const unapproved = new Map([["A", { class: "A", lesson: GOOD }]]);
 const sessions = (n, cls = "A") => Array.from({ length: n }, (_, i) => err(`s${i}`, cls));
 const standingOf = (entries, cls = "A") => lessons.standing(entries, known).find((s) => s.class === cls);
-check("a repeating lesson waits for approval before it joins the hint",
-  lessons.standing(sessions(3), unapproved)[0].status === "waiting" && lessons.hintLessons(sessions(3), unapproved).length === 0);
+check("a repeating lesson joins the hint by itself, with no approval",
+  lessons.standing(sessions(3), unapproved)[0].status === "hint" && JSON.stringify(lessons.hintLessons(sessions(3), unapproved)) === JSON.stringify([GOOD]) &&
+  lessons.standing(sessions(6), unapproved)[0].status === "dropped");
 check("a lesson is only shown at the error until it repeats in 3 sessions",
   standingOf(sessions(2)).status === "learned" && standingOf(sessions(3)).status === "hint" && standingOf(sessions(5)).status === "hint");
 check("a hint lesson that does not prevent its error is dropped from the hint", standingOf(sessions(6)).status === "dropped");
@@ -361,9 +356,6 @@ fs.mkdirSync(data, { recursive: true });
 fs.writeFileSync(lessonsFile, `${JSON.stringify({ v: 1, class: CLASS, lesson: GOOD })}\n`);
 for (const s of ["s1", "s2", "s3"]) journal.record({ kind: "result", session: s, tool: FIGMA, ok: false, class: CLASS, advice: "learned", scriptError: true });
 handlers.session_start({}, {});
-check("an unapproved lesson stays out of the hint", handlers.before_agent_start(figmaPrompt, { cwd: dir })?.message?.content === mod.HINT);
-check("approving a lesson by number works", lessons.approveLesson(1) === "approved");
-handlers.session_start({}, {});
 const hint = handlers.before_agent_start(figmaPrompt, { cwd: dir })?.message?.content ?? "";
 check("the hint carries the lessons of errors that keep repeating", hint.startsWith(mod.HINT) && hint.includes(GOOD) && hint.length > mod.HINT.length);
 check("the hint labels learned lessons as Figma tips, not instructions", typeof mod.LEARNED_HINT_NOTE === "string" && hint.includes(mod.LEARNED_HINT_NOTE) && /not instructions/i.test(mod.LEARNED_HINT_NOTE));
@@ -371,8 +363,8 @@ fs.writeFileSync(journalFile, "{ not json\n");
 handlers.session_start({}, {});
 check("a corrupt journal leaves the hint unchanged", handlers.before_agent_start(figmaPrompt, { cwd: dir })?.message?.content === mod.HINT);
 
-const waitingReport = journal.formatReport({ ...journal.summarize(sessions(3)), lessons: lessons.standing(sessions(3), unapproved) });
-check("the report says how to approve a waiting lesson", /waiting/.test(waitingReport) && /npm run lessons -- approve 1/.test(waitingReport));
+const autoReport = journal.formatReport({ ...journal.summarize(sessions(3)), lessons: lessons.standing(sessions(3), unapproved) });
+check("the report asks for no approval", /hint\s+3\s+A/.test(autoReport) && !/approv|waiting/i.test(autoReport));
 
 reset();
 fs.mkdirSync(data, { recursive: true });
@@ -381,10 +373,10 @@ const cli = (...args) => spawnSync(process.execPath, ["--experimental-strip-type
 const listed = cli();
 check("npm run lessons lists the lessons by number", listed.status === 0 && /1\. .*Expected array/.test(listed.stdout) && listed.stdout.includes(GOOD) && /2\. Other/.test(listed.stdout));
 const approvedRun = cli("approve", "2");
-check("npm run lessons -- approve <n> approves that lesson", approvedRun.status === 0 && lessons.readLessons().get("Other").approved === true && !lessons.readLessons().get(CLASS).approved);
+check("npm run lessons has no approve command", approvedRun.status === 1 && /usage/i.test(approvedRun.stderr) && !/approve/.test(approvedRun.stderr) && lessons.readLessons().size === 2);
 const retiredRun = cli("retire", "1");
 check("npm run lessons -- retire <n> retires that lesson", retiredRun.status === 0 && !lessons.readLessons().has(CLASS) && lessons.readRetired().has(CLASS));
-const badRun = cli("approve", "9");
+const badRun = cli("retire", "9");
 check("a wrong number changes nothing and says so", badRun.status === 1 && /no lesson 9/i.test(badRun.stderr) && lessons.readLessons().size === 1);
 
 const report = journal.formatReport({
@@ -469,8 +461,7 @@ fs.writeFileSync(lessonsFile, `${JSON.stringify({ v: 1, class: VAGUE, lesson: KI
 check("a lesson of a vague error saved without names is not used", lessons.readLessons().size === 0 && !seen(kidsScript).includes(KIDS));
 
 fs.writeFileSync(lessonsFile, vagueLessons.map((l) => JSON.stringify(l)).join("\n") + "\n");
-check("approving and retiring by number work for one cause of a vague error",
-  lessons.approveLesson(1) === "approved" && lessons.readLessons().get(KIDS_KEY).approved === true && !lessons.readLessons().get(FILLS_KEY).approved &&
+check("retiring by number works for one cause of a vague error",
   lessons.retireLesson(1) === "retired" && !lessons.readLessons().has(KIDS_KEY) && lessons.readLessons().has(FILLS_KEY) && lessons.readRetired().has(KIDS_KEY));
 calls = [];
 check("a retired cause is not learned again", learner.learn(vague, { run: fake(`${KIDS}\nWHEN: children`) }) === "retired" && !lessons.readLessons().has(KIDS_KEY));

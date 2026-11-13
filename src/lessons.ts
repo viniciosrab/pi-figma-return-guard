@@ -21,7 +21,7 @@ export const LESSON_MAX = 400;
 // links, tags, entities, code fences or node IDs, and none of a few phrases no
 // Figma rule needs. A keyword check cannot catch every rewording, so it is not
 // the defense: lessons always reach the agent labeled as tips, and a lesson
-// joins the session-start hint only after the user approves it.
+// joins the session-start hint only after its error keeps repeating.
 const TYPOGRAPHIC = [
   [/[\u2018\u2019\u201a\u201b]/g, "'"],
   [/[\u201c\u201d\u201e\u201f]/g, '"'],
@@ -116,21 +116,14 @@ export function parseLessons(text) {
         lessons.delete(lessonKey(entry.class, entry.when));
         continue;
       }
-      // An approval names the exact lesson text it approves.
-      if (typeof entry.approved === "string") {
-        const current = lessons.get(lessonKey(entry.class, entry.when));
-        if (current && current.lesson === validateLesson(entry.approved)) {
-          current.approved = true;
-          current.approvedAt = entry.ts;
-        }
-        continue;
-      }
+      // Approval lines written by older versions; lessons need none now.
+      if ("approved" in entry) continue;
       const lesson = validateLesson(entry.lesson);
       if (!lesson) continue;
       const when = namesNothing(entry.class) ? validateWhen(entry.when, lesson) : undefined;
       if (namesNothing(entry.class) && !when) continue;
       const key = lessonKey(entry.class, when);
-      lessons.set(key, { ...entry, key, lesson, when, approved: false });
+      lessons.set(key, { ...entry, key, lesson, when });
     } catch {}
   }
   return lessons;
@@ -154,7 +147,6 @@ function mark(n, entry) {
   appendLine(lessonsPath(), { v: 1, ts: new Date().toISOString(), class: lesson.class, ...(lesson.when ? { when: lesson.when } : {}), ...entry(lesson) });
   return "ok";
 }
-export const approveLesson = (n) => (mark(n, (l) => ({ approved: l.lesson })) === "ok" ? "approved" : "missing");
 export const retireLesson = (n) => (mark(n, () => ({ retired: true })) === "ok" ? "retired" : "missing");
 
 export function appendLine(file, entry) {
@@ -173,22 +165,20 @@ export function learningOn() {
   }
 }
 
-// A lesson can join the session-start hint once its error has happened in
-// this many sessions and the user approved it, and leaves it when the error
-// happens in this many more sessions after the approval: the line is then not
-// preventing it. The volumes are too small for statistics.
+// A lesson joins the session-start hint by itself once its error has happened
+// in this many sessions, and leaves it when the error happens in this many
+// more: the line is then not preventing it. The volumes are too small for
+// statistics.
 export const PROMOTE_AT = 3;
 export const DROP_AFTER = 3;
 const HINT_MAX_LESSONS = 8;
 const HINT_MAX_CHARS = 1200;
 
 // Each lesson with its number, how often its error happened and where it
-// stands: "learned" (shown when the error happens), "waiting" (repeats enough
-// for the hint, waits for the user's approval), "hint" (also told up front) or
+// stands: "learned" (shown when the error happens), "hint" (also told up front) or
 // "dropped" (was told up front and did not prevent the error).
 export function standing(entries, lessons) {
   const sessions = new Map();
-  const afterApproval = new Map();
   const counts = new Map();
   const add = (map, key, value) => (map.get(key) ?? map.set(key, new Set()).get(key)).add(value);
   for (const e of entries ?? []) {
@@ -202,8 +192,6 @@ export function standing(entries, lessons) {
       const savedAt = Date.parse(lesson.ts ?? "");
       if (savedAt && at < savedAt) continue;
       add(sessions, key, e.session);
-      const approvedAt = Date.parse(lesson.approvedAt ?? "");
-      if (approvedAt && at > approvedAt) add(afterApproval, key, e.session);
       counts.set(key, (counts.get(key) ?? 0) + 1);
     }
   }
@@ -211,8 +199,9 @@ export function standing(entries, lessons) {
   return [...lessons.entries()]
     .map(([key, l], i) => {
       const n = sessions.get(key)?.size ?? 0;
-      const since = l.approvedAt ? (afterApproval.get(key)?.size ?? 0) : Math.max(0, n - PROMOTE_AT);
-      const status = n < PROMOTE_AT ? "learned" : !l.approved ? "waiting" : since < DROP_AFTER ? "hint" : "dropped";
+      // Sessions past the one that put the lesson in the hint.
+      const since = Math.max(0, n - PROMOTE_AT);
+      const status = n < PROMOTE_AT ? "learned" : since < DROP_AFTER ? "hint" : "dropped";
       return { number: i + 1, class: key, lesson: l.lesson, sessions: n, count: counts.get(key) ?? 0, status };
     })
     .sort((a, b) => b.sessions - a.sessions || b.count - a.count);

@@ -132,11 +132,6 @@ export function formatReport(summary) {
     for (const l of summary.lessons) {
       out.push(`  ${String(l.number ?? "").padEnd(3)} ${l.status.padEnd(8)}  ${String(l.sessions).padStart(8)}  ${l.class}`, `                lesson: ${l.lesson}`);
     }
-    const waiting = summary.lessons.filter((l) => l.status === "waiting");
-    if (waiting.length) {
-      out.push("", "Waiting for your approval to join the session-start hint (their errors keep repeating):");
-      for (const l of waiting) out.push(`  npm run lessons -- approve ${l.number}    (or: npm run lessons -- retire ${l.number})`);
-    }
   }
   return out.join("\n");
 }
